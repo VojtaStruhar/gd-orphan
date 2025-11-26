@@ -143,6 +143,33 @@ for script_resource in resources.values():
                 classnames[cn] = script_resource.uid
                 break
 
+# Also go over Autoloads and register their node names as class names
+with open(os.path.join(PROJECT_PATH, "project.godot")) as project_file:
+    autoloads_section = False
+    while line := project_file.readline():
+        if line.startswith("run/main_scene"):
+            _, main_scene_uid = line.strip().split("=")
+            main_scene_uid = main_scene_uid.replace('"', "")
+
+        if line.startswith("["):
+            if autoloads_section:
+                break  # Finished autoloads section, that's what I care about
+            autoloads_section = line.strip() == "[autoload]"
+            continue
+
+        if autoloads_section:
+            if len(line.strip()) > 0:
+                cn, file_path = line.strip().split("=")
+                file_path = (
+                    file_path.replace("*", "").replace('"', "").removeprefix("res://")
+                )
+                autoload_uid = next(
+                    (r.uid for r in resources.values() if r.path == file_path)
+                )
+                assert cn not in classnames
+                classnames[cn] = autoload_uid
+
+
 print(f"Collected {len(classnames)} GDScript class_names")
 
 # Go over scripts' contents once more and detect class name usage (regex?)
