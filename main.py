@@ -69,8 +69,17 @@ class Resource:
     def __str__(self):
         return f"<R ({self.type}) '{self.name}'>"
 
+class Project:
+    def __init__(self) -> None:
+        self.main_scene_uid: str = ""
+        self.classnames: Dict[str, str] = {}
+        """ class_name --> UID mapping"""
+        self.resources: Dict[str, Resource] = {}
+        """ UID --> Scene/Script/Texture/... mapping"""
 
-resources: Dict[str, Resource] = {}
+
+project = Project()
+
 
 for root, dirs, files in os.walk(PROJECT_PATH):
     relative = root.replace(PROJECT_PATH, "")
@@ -84,10 +93,10 @@ for root, dirs, files in os.walk(PROJECT_PATH):
             if os.path.exists(uid_path):
                 with open(uid_path) as uid_file:
                     uid = uid_file.readline().strip()
-                if script_resource := resources.get(uid):
+                if script_resource := project.resources.get(uid):
                     script_resource.references += 1
                     continue
-                resources[uid] = Resource(uid, os.path.join(root, f))
+                project.resources[uid] = Resource(uid, os.path.join(root, f))
 
         elif f.endswith(".import"):
             # NOTE: Actually, .import files have `deps/source` attribute in them that points
@@ -103,10 +112,10 @@ for root, dirs, files in os.walk(PROJECT_PATH):
                     if line.startswith('uid="'):
                         uid = line[len('uid="') : -1]
 
-                        if script_resource := resources.get(uid):
+                        if script_resource := project.resources.get(uid):
                             script_resource.references += 1
                             break
-                        resources[uid] = Resource(uid, image_path)
+                        project.resources[uid] = Resource(uid, image_path)
                         break
 
         elif f.endswith(".tres") or f.endswith(".tscn"):
@@ -116,21 +125,20 @@ for root, dirs, files in os.walk(PROJECT_PATH):
                         start_index = line.index("uid://")
                         end_index = line[start_index:].index('"')
                         uid = line[start_index : (start_index + end_index)]
-                        if script_resource := resources.get(uid):  # Already have
+                        if script_resource := project.resources.get(
+                            uid
+                        ):  # Already have
                             script_resource.references += 1
                             continue
 
-                        resources[uid] = Resource(uid, os.path.join(root, f))
+                        project.resources[uid] = Resource(uid, os.path.join(root, f))
                     except ValueError:
                         pass
 
-print("Collected", len(resources), "resources")
-
-## Class names and UIDs
-classnames: Dict[str, str] = {}
+print("Collected", len(project.resources), "project.resources")
 
 # Go over scripts, extract class names
-for script_resource in resources.values():
+for script_resource in project.resources.values():
     if script_resource.type != "script":
         continue
 
@@ -139,8 +147,8 @@ for script_resource in resources.values():
             line = script_file.readline().strip()
             if "class_name" in line:
                 cn = line[line.index("class_name") :].split()[1]
-                assert cn not in classnames
-                classnames[cn] = script_resource.uid
+                assert cn not in project.classnames
+                project.classnames[cn] = script_resource.uid
                 break
 
 # Also go over Autoloads and register their node names as class names
@@ -164,23 +172,23 @@ with open(os.path.join(PROJECT_PATH, "project.godot")) as project_file:
                     file_path.replace("*", "").replace('"', "").removeprefix("res://")
                 )
                 autoload_uid = next(
-                    (r.uid for r in resources.values() if r.path == file_path)
+                    (r.uid for r in project.resources.values() if r.path == file_path)
                 )
-                assert cn not in classnames
-                classnames[cn] = autoload_uid
+                assert cn not in project.classnames
+                project.classnames[cn] = autoload_uid
 
 
-print(f"Collected {len(classnames)} GDScript class_names")
+print(f"Collected {len(project.classnames)} GDScript class_names")
 
 # Go over scripts' contents once more and detect class name usage (regex?)
 
 MISSING_FILES: Set[str] = set()
 
-for script_resource in resources.values():
+for script_resource in project.resources.values():
     if script_resource.type != "script":
         continue
 
-    for cn, uid in classnames.items():
+    for cn, uid in project.classnames.items():
         if script_resource.uid == uid:
             continue  # Don't detect on yourself
 
@@ -192,14 +200,14 @@ for script_resource in resources.values():
                 if line.startswith("#"):
                     continue
                 if re.search(classname_detection, line):
-                    resources[uid].references += 1
+                    project.resources[uid].references += 1
                 if 'load("' in line:
                     start_index = line.index("load(") + len('load("')
                     end_index = line[start_index:].index('")')
                     loaded_thing = line[start_index : (start_index + end_index)]
                     if loaded_thing.startswith("uid://"):
-                        if loaded_thing in resources:
-                            resources[loaded_thing].references += 1
+                        if loaded_thing in project.resources:
+                            project.resources[loaded_thing].references += 1
                             # else - track INVALID (nonexistent) loads?
                     else:
                         if loaded_thing.startswith("res://"):  # Absolute path load
@@ -214,7 +222,7 @@ for script_resource in resources.values():
                             res = next(
                                 (
                                     r
-                                    for r in resources.values()
+                                    for r in project.resources.values()
                                     if r.path == loaded_thing
                                 )
                             )
@@ -226,19 +234,22 @@ for mf in MISSING_FILES:
     print("Could not find referenced resource:", mf)
 
 with open("safe_to_remove.txt", "w") as outfile:
-    for uid, resource in resources.items():
+    for uid, resource in project.resources.items():
         if resource.references == 0:
             outfile.write(resource.path + "\n")
 
 
 print(
-    "Totally orphan resources:",
-    sum((1 for r in resources.values() if r.references == 0)),
+    "Totally orphan project.resources:",
+    sum((1 for r in project.resources.values() if r.references == 0)),
     "out of",
-    len(resources),
+    len(project.resources),
 )
 potential_savings = sum(
-    (os.path.getsize(os.path.join(PROJECT_PATH, r.path)) for r in resources.values())
+    (
+        os.path.getsize(os.path.join(PROJECT_PATH, r.path))
+        for r in project.resources.values()
+    )
 )
 print("Potential savings:", format_memory(potential_savings))
 
