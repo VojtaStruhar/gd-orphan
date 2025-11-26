@@ -1,30 +1,39 @@
-import re
 import os
-from typing import List, Dict, Set
+import re
 from datetime import datetime
+from typing import Dict, Set
 
 PROJECT_PATH = "/Users/vojtechstruhar/Development/VeskaGames/manabies/manabies_project/"
 
-IGNORED_FOLDERS = [".idea", ".git", ".vscode", ".cursor", ".godot", "android", "ios_export"]
+IGNORED_FOLDERS = [
+    ".idea",
+    ".git",
+    ".vscode",
+    ".cursor",
+    ".godot",
+    "android",
+    "ios_export",
+]
 
 # ----------------------------------------
 
 startTime = datetime.now()
 
-
+assert PROJECT_PATH.endswith("/")
 
 
 def format_memory(amount: int) -> str:
     if amount < 1_000:
         return f"{amount:.2f} B"
     if amount < 1_000_000:
-        return f"{amount/1000:.2f} KB"
+        return f"{amount / 1000:.2f} KB"
     if amount < 1_000_000_000:
-        return f"{amount/1000_000:.2f} MB"
+        return f"{amount / 1000_000:.2f} MB"
     if amount < 1_000_000_000_000:
-        return f"{amount/1000_000_000:.2f} GB"
+        return f"{amount / 1000_000_000:.2f} GB"
 
     assert False, "what"
+
 
 class Resource:
     def __init__(self, unique_id: str, path: str):
@@ -55,6 +64,7 @@ class Resource:
     def __str__(self):
         return f"<R ({self.type}) '{self.name}'>"
 
+
 resources: Dict[str, Resource] = {}
 
 for root, dirs, files in os.walk(PROJECT_PATH):
@@ -67,22 +77,26 @@ for root, dirs, files in os.walk(PROJECT_PATH):
         if f.endswith(".gd"):
             uid_path = os.path.join(root, f + ".uid")
             if os.path.exists(uid_path):
-                uid = open(uid_path).readline().strip()
+                with open(uid_path) as uid_file:
+                    uid = uid_file.readline().strip()
                 if script_resource := resources.get(uid):
                     script_resource.references += 1
                     continue
                 resources[uid] = Resource(uid, os.path.join(root, f))
 
         elif f.endswith(".import"):
+            # NOTE: Actually, .import files have `deps/source` attribute in them that points
+            #       to the original file. But as far as I can tell, it's always this one
             image_path = os.path.join(root, f).removesuffix(".import")
             if not os.path.exists(image_path):
                 print("Strange - import file without original file?", image_path)
                 continue
+
             with open(os.path.join(root, f), "r") as import_file:
                 while line := import_file.readline():
                     line = line.strip()
                     if line.startswith('uid="'):
-                        uid = line[len('uid="'):-1]
+                        uid = line[len('uid="') : -1]
 
                         if script_resource := resources.get(uid):
                             script_resource.references += 1
@@ -96,8 +110,8 @@ for root, dirs, files in os.walk(PROJECT_PATH):
                     try:
                         start_index = line.index("uid://")
                         end_index = line[start_index:].index('"')
-                        uid = line[start_index:(start_index + end_index)]
-                        if script_resource := resources.get(uid): # Already have
+                        uid = line[start_index : (start_index + end_index)]
+                        if script_resource := resources.get(uid):  # Already have
                             script_resource.references += 1
                             continue
 
@@ -119,8 +133,8 @@ for script_resource in resources.values():
         for i in range(5):
             line = script_file.readline().strip()
             if "class_name" in line:
-                cn = line[line.index("class_name"):].split()[1]
-                assert(cn not in classnames)
+                cn = line[line.index("class_name") :].split()[1]
+                assert cn not in classnames
                 classnames[cn] = script_resource.uid
                 break
 
@@ -134,7 +148,7 @@ for script_resource in resources.values():
 
     for cn, uid in classnames.items():
         if script_resource.uid == uid:
-            continue # Don't detect on yourself
+            continue  # Don't detect on yourself
 
         classname_detection = re.compile(r"\W" + cn + r"\W")
 
@@ -148,22 +162,28 @@ for script_resource in resources.values():
                 if 'load("' in line:
                     start_index = line.index("load(") + len('load("')
                     end_index = line[start_index:].index('")')
-                    loaded_thing = line[start_index:(start_index + end_index)]
+                    loaded_thing = line[start_index : (start_index + end_index)]
                     if loaded_thing.startswith("uid://"):
                         if loaded_thing in resources:
                             resources[loaded_thing].references += 1
                             # else - track INVALID (nonexistent) loads?
                     else:
-                        if loaded_thing.startswith("res://"): # Absolute path load
+                        if loaded_thing.startswith("res://"):  # Absolute path load
                             loaded_thing = loaded_thing.removeprefix("res://")
-                        else: # Load relative to the script?
+                        else:  # Load relative to the script?
                             dir_path = os.path.dirname(script_resource.path)
                             while loaded_thing.startswith("../"):
                                 loaded_thing = loaded_thing.removeprefix("../")
                                 dir_path = os.path.dirname(dir_path)
                             loaded_thing = os.path.join(dir_path, loaded_thing)
                         try:
-                            res = next((r for r in resources.values() if r.path == loaded_thing))
+                            res = next(
+                                (
+                                    r
+                                    for r in resources.values()
+                                    if r.path == loaded_thing
+                                )
+                            )
                             res.references += 1
                         except StopIteration:
                             MISSING_FILES.add(loaded_thing)
@@ -177,8 +197,15 @@ with open("safe_to_remove.txt", "w") as outfile:
             outfile.write(resource.path + "\n")
 
 
-print("Totally orphan resources:", sum((1 for r in resources.values() if r.references == 0)), "out of", len(resources))
-potential_savings = sum((os.path.getsize(os.path.join(PROJECT_PATH, r.path)) for r in resources.values()))
+print(
+    "Totally orphan resources:",
+    sum((1 for r in resources.values() if r.references == 0)),
+    "out of",
+    len(resources),
+)
+potential_savings = sum(
+    (os.path.getsize(os.path.join(PROJECT_PATH, r.path)) for r in resources.values())
+)
 print("Potential savings:", format_memory(potential_savings))
 
 
