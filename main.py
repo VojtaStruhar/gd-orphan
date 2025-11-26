@@ -2,7 +2,7 @@ import os
 import re
 import sys
 from datetime import datetime
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 
 PROJECT_PATH = (
     sys.argv[1]
@@ -25,6 +25,13 @@ startTime = datetime.now()
 
 if not PROJECT_PATH.endswith("/"):
     PROJECT_PATH += "/"
+
+
+def extract_protocoled_string(prefix: str, text: str) -> str:
+    start_index = text.index(prefix)
+    end_index = text[start_index:].index('"')
+    uid = text[start_index : (start_index + end_index)]
+    return uid
 
 
 def format_memory(amount: int) -> str:
@@ -51,11 +58,11 @@ class Resource:
         match path.split(".")[-1]:
             case "gd":
                 self.type = "script"
-            case "tres":
+            case "tres" | "res":
                 self.type = "resource"
             case "tscn":
                 self.type = "scene"
-            case "png" | "jpg" | "webp" | "exr" | "tga" | "svg":
+            case "png" | "jpg" | "webp" | "exr" | "tga" | "svg" | "dds":
                 self.type = "image"
             case "otf" | "ttf":
                 self.type = "font"
@@ -63,11 +70,16 @@ class Resource:
                 self.type = "3D model"
             case "wav":
                 self.type = "sound"
+            case "gdshader":
+                self.type = "shader"
+            case "lmbake":
+                self.type = "baked lightmap"
             case _:
                 print("UNKNOWN RESOURCE TYPE:", path)
 
     def __str__(self):
         return f"<R ({self.type}) '{self.name}'>"
+
 
 class Project:
     def __init__(self) -> None:
@@ -120,18 +132,49 @@ for root, dirs, files in os.walk(PROJECT_PATH):
 
         elif f.endswith(".tres") or f.endswith(".tscn"):
             with open(os.path.join(root, f), "r") as res_file:
+                # This should be defined on the very first row of the file
+                scene_resource: Optional[Resource] = None
                 for line in res_file.readlines():
                     try:
-                        start_index = line.index("uid://")
-                        end_index = line[start_index:].index('"')
-                        uid = line[start_index : (start_index + end_index)]
-                        if script_resource := project.resources.get(
-                            uid
-                        ):  # Already have
-                            script_resource.references += 1
-                            continue
+                        if line.startswith("[gd_scene"):
+                            uid = extract_protocoled_string("uid://", line)
 
-                        project.resources[uid] = Resource(uid, os.path.join(root, f))
+                            if scene_resource := project.resources.get(uid):
+                                scene_resource.references += 1
+                                continue
+
+                            scene_resource = Resource(uid, os.path.join(root, f))
+                            project.resources[uid] = scene_resource
+                        elif line.startswith("[gd_resource"):  # .tres
+                            uid = extract_protocoled_string("uid://", line)
+
+                            if scene_resource := project.resources.get(uid):
+                                scene_resource.references += 1
+                                continue
+
+                            scene_resource = Resource(uid, os.path.join(root, f))
+                            project.resources[uid] = scene_resource
+
+                        elif line.startswith("[ext_resource"):
+                            ext_uid = extract_protocoled_string("uid://", line)
+
+                            if res := project.resources.get(ext_uid):
+                                res.references += 1
+                                continue
+
+                            ext_path = extract_protocoled_string("res://", line)
+                            ext_path = ext_path.removeprefix("res://")
+
+                            project.resources[ext_uid] = Resource(ext_uid, ext_path)
+                        elif "uid://" in line and not line.startswith(
+                            "metadata/_custom_type_script"
+                        ):
+                            print(
+                                "Unhandled UID reference in",
+                                scene_resource,
+                                "-",
+                                line.strip(),
+                            )
                     except ValueError:
                         pass
 
@@ -249,6 +292,7 @@ potential_savings = sum(
     (
         os.path.getsize(os.path.join(PROJECT_PATH, r.path))
         for r in project.resources.values()
+        if os.path.exists(os.path.join(PROJECT_PATH, r.path))
     )
 )
 print("Potential savings:", format_memory(potential_savings))
