@@ -1,8 +1,9 @@
+import json
 import os
 import re
 import sys
 from datetime import datetime
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Any
 
 PROJECT_PATH = sys.argv[1]
 
@@ -51,6 +52,7 @@ class Resource:
         self.name = self.path.split("/")[-1]
         self.type = ""
         self.references: int = 0
+        self.referenced_uids: Set[str] = set()
 
         match path.split(".")[-1]:
             case "gd":
@@ -77,6 +79,15 @@ class Resource:
     def __str__(self):
         return f"<R ({self.type}) '{self.name}'>"
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "uid": self.uid,
+            "path": self.path,
+            "name": self.name,
+            "type": self.type,
+            "references": self.references,
+            "referenced_uids": [val for val in self.referenced_uids],
+        }
 
 class Project:
     def __init__(self) -> None:
@@ -86,6 +97,16 @@ class Project:
         self.resources: Dict[str, Resource] = {}
         """ UID --> Scene/Script/Texture/... mapping"""
 
+    def save(self, filepath: str) -> None:
+        with open(filepath, "w") as f:
+            json.dump(self.to_dict(), f, indent=4)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "main_scene_uid": self.main_scene_uid,
+            "classnames": self.classnames,
+            "resources": {key: value.to_dict() for key, value in self.resources.items()}
+        }
 
 project = Project()
 
@@ -196,8 +217,7 @@ with open(os.path.join(PROJECT_PATH, "project.godot")) as project_file:
     autoloads_section = False
     while line := project_file.readline():
         if line.startswith("run/main_scene"):
-            _, main_scene_uid = line.strip().split("=")
-            main_scene_uid = main_scene_uid.replace('"', "")
+            project.main_scene_uid = extract_protocoled_string("uid://", line)
 
         if line.startswith("["):
             if autoloads_section:
@@ -214,7 +234,7 @@ with open(os.path.join(PROJECT_PATH, "project.godot")) as project_file:
                 autoload_uid = next(
                     (r.uid for r in project.resources.values() if r.path == file_path)
                 )
-                assert cn not in project.classnames
+                assert project.classnames.get(cn) is None
                 project.classnames[cn] = autoload_uid
 
 
@@ -296,3 +316,5 @@ print("Potential savings:", format_memory(potential_savings))
 
 
 print("Finished in", datetime.now() - startTime)
+
+project.save("project.json")
