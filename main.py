@@ -157,7 +157,7 @@ for script_resource in resources.values():
         if script_resource.uid == uid:
             continue  # Don't detect on yourself
 
-        classname_detection = re.compile(r"\W" + cn + r"\W")
+        classname_detection = re.compile(r"\b" + cn + r"\b")
 
         with open(os.path.join(PROJECT_PATH, script_resource.path), "r") as script_file:
             for line in script_file.readlines():
