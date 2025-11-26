@@ -4,10 +4,7 @@ import sys
 from datetime import datetime
 from typing import Dict, Optional, Set
 
-PROJECT_PATH = (
-    sys.argv[1]
-    or "/Users/vojtechstruhar/Development/VeskaGames/manabies/manabies_project/"
-)
+PROJECT_PATH = sys.argv[1]
 
 IGNORED_FOLDERS = [
     ".idea",
