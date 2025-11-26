@@ -1,9 +1,13 @@
 import os
 import re
+import sys
 from datetime import datetime
 from typing import Dict, Set
 
-PROJECT_PATH = "/Users/vojtechstruhar/Development/VeskaGames/manabies/manabies_project/"
+PROJECT_PATH = (
+    sys.argv[1]
+    or "/Users/vojtechstruhar/Development/VeskaGames/manabies/manabies_project/"
+)
 
 IGNORED_FOLDERS = [
     ".idea",
@@ -19,7 +23,8 @@ IGNORED_FOLDERS = [
 
 startTime = datetime.now()
 
-assert PROJECT_PATH.endswith("/")
+if not PROJECT_PATH.endswith("/"):
+    PROJECT_PATH += "/"
 
 
 def format_memory(amount: int) -> str:
@@ -137,6 +142,8 @@ for script_resource in resources.values():
                 assert cn not in classnames
                 classnames[cn] = script_resource.uid
                 break
+
+print(f"Collected {len(classnames)} GDScript class_names")
 
 # Go over scripts' contents once more and detect class name usage (regex?)
 
