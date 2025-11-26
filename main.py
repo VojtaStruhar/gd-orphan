@@ -1,0 +1,185 @@
+import re
+import os
+from typing import List, Dict, Set
+from datetime import datetime
+
+PROJECT_PATH = "/Users/vojtechstruhar/Development/VeskaGames/manabies/manabies_project/"
+
+IGNORED_FOLDERS = [".idea", ".git", ".vscode", ".cursor", ".godot", "android", "ios_export"]
+
+# ----------------------------------------
+
+startTime = datetime.now()
+
+
+
+
+def format_memory(amount: int) -> str:
+    if amount < 1_000:
+        return f"{amount:.2f} B"
+    if amount < 1_000_000:
+        return f"{amount/1000:.2f} KB"
+    if amount < 1_000_000_000:
+        return f"{amount/1000_000:.2f} MB"
+    if amount < 1_000_000_000_000:
+        return f"{amount/1000_000_000:.2f} GB"
+
+    assert False, "what"
+
+class Resource:
+    def __init__(self, unique_id: str, path: str):
+        self.uid = unique_id
+        self.path = path.removeprefix(PROJECT_PATH)
+        self.name = self.path.split("/")[-1]
+        self.type = ""
+        self.references: int = 0
+
+        match path.split(".")[-1]:
+            case "gd":
+                self.type = "script"
+            case "tres":
+                self.type = "resource"
+            case "tscn":
+                self.type = "scene"
+            case "png" | "jpg" | "webp" | "exr" | "tga" | "svg":
+                self.type = "image"
+            case "otf" | "ttf":
+                self.type = "font"
+            case "glb" | "gltf" | "fbx" | "blend":
+                self.type = "3D model"
+            case "wav":
+                self.type = "sound"
+            case _:
+                print("UNKNOWN RESOURCE TYPE:", path)
+
+    def __str__(self):
+        return f"<R ({self.type}) '{self.name}'>"
+
+resources: Dict[str, Resource] = {}
+
+for root, dirs, files in os.walk(PROJECT_PATH):
+    relative = root.replace(PROJECT_PATH, "")
+    if any(ignored in relative for ignored in IGNORED_FOLDERS):
+        dirs[:] = []
+        continue
+
+    for f in files:
+        if f.endswith(".gd"):
+            uid_path = os.path.join(root, f + ".uid")
+            if os.path.exists(uid_path):
+                uid = open(uid_path).readline().strip()
+                if script_resource := resources.get(uid):
+                    script_resource.references += 1
+                    continue
+                resources[uid] = Resource(uid, os.path.join(root, f))
+
+        elif f.endswith(".import"):
+            image_path = os.path.join(root, f).removesuffix(".import")
+            if not os.path.exists(image_path):
+                print("Strange - import file without original file?", image_path)
+                continue
+            with open(os.path.join(root, f), "r") as import_file:
+                while line := import_file.readline():
+                    line = line.strip()
+                    if line.startswith('uid="'):
+                        uid = line[len('uid="'):-1]
+
+                        if script_resource := resources.get(uid):
+                            script_resource.references += 1
+                            break
+                        resources[uid] = Resource(uid, image_path)
+                        break
+
+        elif f.endswith(".tres") or f.endswith(".tscn"):
+            with open(os.path.join(root, f), "r") as res_file:
+                for line in res_file.readlines():
+                    try:
+                        start_index = line.index("uid://")
+                        end_index = line[start_index:].index('"')
+                        uid = line[start_index:(start_index + end_index)]
+                        if script_resource := resources.get(uid): # Already have
+                            script_resource.references += 1
+                            continue
+
+                        resources[uid] = Resource(uid, os.path.join(root, f))
+                    except ValueError:
+                        pass
+
+print("Collected", len(resources), "resources")
+
+## Class names and UIDs
+classnames: Dict[str, str] = {}
+
+# Go over scripts, extract class names
+for script_resource in resources.values():
+    if script_resource.type != "script":
+        continue
+
+    with open(os.path.join(PROJECT_PATH, script_resource.path), "r") as script_file:
+        for i in range(5):
+            line = script_file.readline().strip()
+            if "class_name" in line:
+                cn = line[line.index("class_name"):].split()[1]
+                assert(cn not in classnames)
+                classnames[cn] = script_resource.uid
+                break
+
+# Go over scripts' contents once more and detect class name usage (regex?)
+
+MISSING_FILES: Set[str] = set()
+
+for script_resource in resources.values():
+    if script_resource.type != "script":
+        continue
+
+    for cn, uid in classnames.items():
+        if script_resource.uid == uid:
+            continue # Don't detect on yourself
+
+        classname_detection = re.compile(r"\W" + cn + r"\W")
+
+        with open(os.path.join(PROJECT_PATH, script_resource.path), "r") as script_file:
+            for line in script_file.readlines():
+                line = line.strip()
+                if line.startswith("#"):
+                    continue
+                if re.search(classname_detection, line):
+                    resources[uid].references += 1
+                if 'load("' in line:
+                    start_index = line.index("load(") + len('load("')
+                    end_index = line[start_index:].index('")')
+                    loaded_thing = line[start_index:(start_index + end_index)]
+                    if loaded_thing.startswith("uid://"):
+                        if loaded_thing in resources:
+                            resources[loaded_thing].references += 1
+                            # else - track INVALID (nonexistent) loads?
+                    else:
+                        if loaded_thing.startswith("res://"): # Absolute path load
+                            loaded_thing = loaded_thing.removeprefix("res://")
+                        else: # Load relative to the script?
+                            dir_path = os.path.dirname(script_resource.path)
+                            while loaded_thing.startswith("../"):
+                                loaded_thing = loaded_thing.removeprefix("../")
+                                dir_path = os.path.dirname(dir_path)
+                            loaded_thing = os.path.join(dir_path, loaded_thing)
+                        try:
+                            res = next((r for r in resources.values() if r.path == loaded_thing))
+                            res.references += 1
+                        except StopIteration:
+                            MISSING_FILES.add(loaded_thing)
+
+for mf in MISSING_FILES:
+    print("Could not find referenced resource:", mf)
+
+with open("safe_to_remove.txt", "w") as outfile:
+    for uid, resource in resources.items():
+        if resource.references == 0:
+            outfile.write(resource.path + "\n")
+
+
+print("Totally orphan resources:", sum((1 for r in resources.values() if r.references == 0)), "out of", len(resources))
+potential_savings = sum((os.path.getsize(os.path.join(PROJECT_PATH, r.path)) for r in resources.values()))
+print("Potential savings:", format_memory(potential_savings))
+
+
+print("Finished in", datetime.now() - startTime)
