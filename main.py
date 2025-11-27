@@ -185,7 +185,7 @@ class Project:
                         rogue_uid = extract_protocoled_string("uid://", line)
                         scene_resource.referenced_uids.add(rogue_uid)
                 except ValueError:
-                    # `extract_protocoled_string` failed, somewhere
+                    # Probably an inline resource
                     print("Substring index search failed on line:", line)
 
         return scene_resource
@@ -301,8 +301,30 @@ for script_resource in project.resources.values():
 for mf in MISSING_FILES:
     print("Could not find referenced resource:", mf)
 
-
-
 print("Finished in", datetime.now() - startTime)
 
 project.save("project.json")
+
+# GENERATE FLOWCHART
+referenced_from_main: Set[str] = set()
+explored: Dict[str, bool] = {}
+
+flowchart: str = "flowchart LR\n"
+for res in project.resources.values():
+    for ref in res.referenced_uids:
+        brackets = ("[", "]")
+        name = res.name
+        if res.type == "script":
+            brackets = ("([", "])")
+            name = project.classnames.get(res.uid, res.name)
+        elif res.type == "resource":
+            brackets = ("{{", "}}")
+        elif res.type == "scene":
+            brackets = ("[[", "]]")
+        elif res.type == "image":
+            name = f"fa:fa-image {name}"
+
+        flowchart += f"    {res.uid}{brackets[0]}{name}{brackets[1]} --> {ref}\n"
+
+with open("flowchart-mermaid.txt", "w") as flowchart_file:
+    flowchart_file.write(flowchart)
