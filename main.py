@@ -19,7 +19,9 @@ IGNORED_FOLDERS = [
 
 # ----------------------------------------
 
-startTime = datetime.now()
+setting_mermaid = False
+setting_load_cached_project = True
+setting_modify_export_presets = True
 
 if not PROJECT_PATH.endswith("/"):
     PROJECT_PATH += "/"
@@ -28,12 +30,32 @@ def is_valid_uid(uid: str) -> bool:
     parts = uid.split("://")
     return len(parts) == 2 and parts[0] == "uid" and parts[1].isalnum()
 
+def quote(s: str) -> str:
+    return '"' + s + '"'
+
 def extract_protocoled_string(prefix: str, text: str) -> str:
     start_index = text.index(prefix)
     end_index = text[start_index:].index('"')
     uid = text[start_index : (start_index + end_index)]
     return uid
 
+
+def format_mermaid_resource(res: Resource) -> str:
+    brackets = ("[", "]")
+    name = res.name
+    if res.type == "script":
+        brackets = ("([", "])")
+        if res.uid in project.classnames.values():
+            name = next((key for key, val in project.classnames.items() if val == res.uid))
+
+    elif res.type == "resource":
+        brackets = ("{{", "}}")
+    elif res.type == "scene":
+        brackets = ("[[", "]]")
+    elif res.type == "image":
+        brackets = ("([", "])")
+
+    return f"{res.uid}{brackets[0]}{name}{brackets[1]}"
 
 def format_memory(amount: int) -> str:
     if amount < 1_000:
@@ -77,6 +99,9 @@ class Resource:
                 self.type = "baked lightmap"
             case _:
                 print("UNKNOWN RESOURCE TYPE:", path)
+
+    def abspath(self) -> str:
+        return os.path.join(PROJECT_PATH, self.path)
 
     def __str__(self):
         return f"<R ({self.type}) '{self.name}'>"
@@ -214,12 +239,13 @@ class Project:
 
 project = Project()
 
-if os.path.exists("project.json"):
+if setting_load_cached_project and os.path.exists("project.json"):
     print("Loading project.json")
     with open("project.json", "r") as project_file:
         data = json.load(project_file)
         project = Project.from_dict(data)
 else:
+    startTime = datetime.now()
     for root, dirs, files in os.walk(PROJECT_PATH):
         relative = root.replace(PROJECT_PATH, "")
         if any(ignored in relative for ignored in IGNORED_FOLDERS):
@@ -301,7 +327,7 @@ else:
                         loaded_thing = line[start_index : (start_index + end_index)]
                         if loaded_thing.startswith("uid://"):
                             if referenced := project.resources.get(loaded_thing):
-                                script_resource.referenced_uids.add(referenced.uid)
+                                script_resource.referenced_uids.add(loaded_thing)
                             # else - track INVALID (nonexistent) loads?
                         else:
                             if loaded_thing.startswith("res://"):  # Absolute path load
@@ -329,14 +355,12 @@ else:
         print("Could not find referenced resource:", mf)
 
     print("Finished in", datetime.now() - startTime)
+    project.save("project.json")
 
-project.save("project.json")
 
-# GENERATE FLOWCHART
 to_explore: List[str] = [project.main_scene_uid]
 explored: Set[str] = set()
 
-flowchart: str = "flowchart LR\n"
 while len(to_explore) > 0:
     uid = to_explore.pop()
     for ref_uid in project.resources[uid].referenced_uids:
@@ -347,24 +371,44 @@ while len(to_explore) > 0:
 
 print("Resourced referenced from main:", len(explored))
 
-def format_mermaid_resource(res: Resource) -> str:
-    brackets = ("[", "]")
-    name = res.name
-    if res.type == "script":
-        brackets = ("([", "])")
-        if res.uid in project.classnames.values():
-            name = next((key for key, val in project.classnames.items() if val == res.uid))
+unused_resources = [res for uid, res in project.resources.items() if res.uid not in explored and os.path.exists(res.abspath())]
+unused_abspaths = [res.abspath() for res in unused_resources]
+print("Unused resources:", len(unused_abspaths))
+potential_savings: int = sum([os.path.getsize(unused_path) for unused_path in unused_abspaths])
+print("Potential savings:", format_memory(potential_savings))
 
-    elif res.type == "resource":
-        brackets = ("{{", "}}")
-    elif res.type == "scene":
-        brackets = ("[[", "]]")
-    elif res.type == "image":
-        brackets = ("([", "])")
+with open("safe_to_delete.txt", "w") as safe_to_delete:
+    safe_to_delete.write("\n".join(unused_abspaths))
 
-    return f"{res.uid}{brackets[0]}{name}{brackets[1]}"
 
-if True:
+if setting_modify_export_presets:
+    export_presets_path = os.path.join(PROJECT_PATH, "export_presets.cfg")
+    print("Modifying export presets:", export_presets_path)
+    export_output: List[str] = []
+    with open(export_presets_path, "r") as export_presets:
+        web_export_section = False
+        for line in export_presets.readlines():
+            line = line.strip()
+            if line.startswith("name="):
+                web_export_section = line.split("=")[1].replace('"', '').strip() == "Web"
+
+
+            if web_export_section:
+                if line.startswith("export_filter="):
+                    export_output.append('export_filter="exclude"')
+                    export_output.append('export_files=PackedStringArray(' + ", ".join([quote("res://" + res.path) for res in unused_resources]) + ")")
+                    continue
+
+                if line.startswith("export_files="):
+                    continue
+
+            export_output.append(line)
+
+    with open(export_presets_path, "w") as export_presets:
+        export_presets.write("\n".join(export_output))
+
+
+if setting_mermaid:
     print("Generating flow chart...")
     flowchart = """---
 config:
