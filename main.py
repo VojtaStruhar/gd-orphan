@@ -51,7 +51,6 @@ class Resource:
         self.path = path.removeprefix(PROJECT_PATH)
         self.name = self.path.split("/")[-1]
         self.type = ""
-        self.references: int = 0
         self.referenced_uids: Set[str] = set()
 
         match path.split(".")[-1]:
@@ -85,7 +84,6 @@ class Resource:
             "path": self.path,
             "name": self.name,
             "type": self.type,
-            "references": self.references,
             "referenced_uids": [val for val in self.referenced_uids],
         }
 
@@ -108,6 +106,90 @@ class Project:
             "resources": {key: value.to_dict() for key, value in self.resources.items()}
         }
 
+    def process_file(self, root: str, f: str) -> Optional[Resource]:
+        if f.endswith(".gd") or f.endswith(".gdshader"):
+            return self.process_script(root, f)
+        elif f.endswith(".import"):
+            return self.process_imported_file(root, f)
+        elif f.endswith(".tres") or f.endswith(".tscn"):
+            return self.process_scene_or_resource(root, f)
+        elif os.path.exists(os.path.join(PROJECT_PATH, f + ".import")):
+            print("Falling back to .import path for", f)
+            return self.process_imported_file(root, f + ".import")
+        else:
+            #print("UNKNOWN FILE:", f)
+            pass
+
+        return None
+
+    def process_script(self, root: str, f: str) -> Optional[Resource]:
+        uid_path = os.path.join(root, f + ".uid")
+        if os.path.exists(uid_path):
+            with open(uid_path) as uid_file:
+                script_uid = uid_file.readline().strip()
+
+            self.resources[script_uid] = Resource(script_uid, os.path.join(root, f))
+            return self.resources[script_uid]
+        return None
+
+    def process_imported_file(self, root: str, f: str) -> Optional[Resource]:
+        # NOTE: Actually, .import files have `deps/source` attribute in them that points
+        #       to the original file. But as far as I can tell, it's always this one
+        image_path = os.path.join(root, f).removesuffix(".import")
+        if not os.path.exists(image_path):
+            print("Strange - import file without original file?", image_path)
+            return None
+
+        with open(os.path.join(root, f), "r") as import_file:
+            while line := import_file.readline():
+                line = line.strip()
+                if line.startswith('uid="'):
+                    imported_uid = line[len('uid="'): -1]
+                    self.resources[imported_uid] = Resource(imported_uid, image_path)
+                    return self.resources[imported_uid]
+        return None
+    def process_scene_or_resource(self, root: str, f: str) -> Optional[Resource]:
+        with open(os.path.join(root, f), "r") as res_file:
+            # This should be defined on the very first row of the file
+            scene_resource: Optional[Resource] = None
+            for line in res_file.readlines():
+                try:
+                    if line.startswith("[gd_scene"):
+                        scene_uid = extract_protocoled_string("uid://", line)
+                        scene_resource = Resource(scene_uid, os.path.join(root, f))
+                        self.resources[scene_uid] = scene_resource
+
+                    elif line.startswith("[gd_resource"):  # .tres
+                        res_uid = extract_protocoled_string("uid://", line)
+                        scene_resource = Resource(res_uid, os.path.join(root, f))
+                        self.resources[res_uid] = scene_resource
+
+                    elif line.startswith("[ext_resource"):
+                        ext_path = extract_protocoled_string("res://", line).removeprefix("res://")
+                        if "uid://" in line:
+                            ext_uid = extract_protocoled_string("uid://", line)
+                        elif ext_res := self.process_file(os.path.join(PROJECT_PATH, os.path.dirname(ext_path)), os.path.basename(ext_path)):
+                            ext_uid = ext_res.uid
+                        else:
+                            print("Skipping external resource", line.strip())
+                            continue
+
+                        if self.resources.get(ext_uid) is None:
+                            self.resources[ext_uid] = Resource(ext_uid, ext_path)
+
+                        scene_resource.referenced_uids.add(ext_uid)
+
+                    elif "uid://" in line and not line.startswith(
+                            "metadata/_custom_type_script"
+                    ):
+                        rogue_uid = extract_protocoled_string("uid://", line)
+                        scene_resource.referenced_uids.add(rogue_uid)
+                except ValueError:
+                    # `extract_protocoled_string` failed, somewhere
+                    print("Substring index search failed on line:", line)
+
+        return scene_resource
+
 project = Project()
 
 
@@ -118,85 +200,10 @@ for root, dirs, files in os.walk(PROJECT_PATH):
         continue
 
     for f in files:
-        if f.endswith(".gd"):
-            uid_path = os.path.join(root, f + ".uid")
-            if os.path.exists(uid_path):
-                with open(uid_path) as uid_file:
-                    uid = uid_file.readline().strip()
-                if script_resource := project.resources.get(uid):
-                    script_resource.references += 1
-                    continue
-                project.resources[uid] = Resource(uid, os.path.join(root, f))
+        project.process_file(root, f)
 
-        elif f.endswith(".import"):
-            # NOTE: Actually, .import files have `deps/source` attribute in them that points
-            #       to the original file. But as far as I can tell, it's always this one
-            image_path = os.path.join(root, f).removesuffix(".import")
-            if not os.path.exists(image_path):
-                print("Strange - import file without original file?", image_path)
-                continue
 
-            with open(os.path.join(root, f), "r") as import_file:
-                while line := import_file.readline():
-                    line = line.strip()
-                    if line.startswith('uid="'):
-                        uid = line[len('uid="') : -1]
-
-                        if script_resource := project.resources.get(uid):
-                            script_resource.references += 1
-                            break
-                        project.resources[uid] = Resource(uid, image_path)
-                        break
-
-        elif f.endswith(".tres") or f.endswith(".tscn"):
-            with open(os.path.join(root, f), "r") as res_file:
-                # This should be defined on the very first row of the file
-                scene_resource: Optional[Resource] = None
-                for line in res_file.readlines():
-                    try:
-                        if line.startswith("[gd_scene"):
-                            uid = extract_protocoled_string("uid://", line)
-
-                            if scene_resource := project.resources.get(uid):
-                                scene_resource.references += 1
-                                continue
-
-                            scene_resource = Resource(uid, os.path.join(root, f))
-                            project.resources[uid] = scene_resource
-                        elif line.startswith("[gd_resource"):  # .tres
-                            uid = extract_protocoled_string("uid://", line)
-
-                            if scene_resource := project.resources.get(uid):
-                                scene_resource.references += 1
-                                continue
-
-                            scene_resource = Resource(uid, os.path.join(root, f))
-                            project.resources[uid] = scene_resource
-
-                        elif line.startswith("[ext_resource"):
-                            ext_uid = extract_protocoled_string("uid://", line)
-
-                            if res := project.resources.get(ext_uid):
-                                res.references += 1
-                                continue
-
-                            ext_path = extract_protocoled_string("res://", line)
-                            ext_path = ext_path.removeprefix("res://")
-
-                            project.resources[ext_uid] = Resource(ext_uid, ext_path)
-                        elif "uid://" in line and not line.startswith(
-                            "metadata/_custom_type_script"
-                        ):
-                            print(
-                                "Unhandled UID reference in",
-                                scene_resource,
-                                "-",
-                                line.strip(),
-                            )
-                    except ValueError:
-                        pass
-
-print("Collected", len(project.resources), "project.resources")
+print("Collected", len(project.resources), "project resources")
 
 # Go over scripts, extract class names
 for script_resource in project.resources.values():
@@ -248,8 +255,8 @@ for script_resource in project.resources.values():
     if script_resource.type != "script":
         continue
 
-    for cn, uid in project.classnames.items():
-        if script_resource.uid == uid:
+    for cn, classname_uid in project.classnames.items():
+        if script_resource.uid == classname_uid:
             continue  # Don't detect on yourself
 
         classname_detection = re.compile(r"\b" + cn + r"\b")
@@ -260,15 +267,15 @@ for script_resource in project.resources.values():
                 if line.startswith("#"):
                     continue
                 if re.search(classname_detection, line):
-                    project.resources[uid].references += 1
+                    script_resource.referenced_uids.add(classname_uid)
                 if 'load("' in line:
                     start_index = line.index("load(") + len('load("')
                     end_index = line[start_index:].index('")')
                     loaded_thing = line[start_index : (start_index + end_index)]
                     if loaded_thing.startswith("uid://"):
-                        if loaded_thing in project.resources:
-                            project.resources[loaded_thing].references += 1
-                            # else - track INVALID (nonexistent) loads?
+                        if referenced := project.resources.get(loaded_thing):
+                            script_resource.referenced_uids.add(referenced.uid)
+                        # else - track INVALID (nonexistent) loads?
                     else:
                         if loaded_thing.startswith("res://"):  # Absolute path load
                             loaded_thing = loaded_thing.removeprefix("res://")
@@ -278,6 +285,7 @@ for script_resource in project.resources.values():
                                 loaded_thing = loaded_thing.removeprefix("../")
                                 dir_path = os.path.dirname(dir_path)
                             loaded_thing = os.path.join(dir_path, loaded_thing)
+
                         try:
                             res = next(
                                 (
@@ -286,33 +294,13 @@ for script_resource in project.resources.values():
                                     if r.path == loaded_thing
                                 )
                             )
-                            res.references += 1
+                            script_resource.referenced_uids.add(res.uid)
                         except StopIteration:
                             MISSING_FILES.add(loaded_thing)
 
 for mf in MISSING_FILES:
     print("Could not find referenced resource:", mf)
 
-with open("safe_to_remove.txt", "w") as outfile:
-    for uid, resource in project.resources.items():
-        if resource.references == 0:
-            outfile.write(resource.path + "\n")
-
-
-print(
-    "Totally orphan project.resources:",
-    sum((1 for r in project.resources.values() if r.references == 0)),
-    "out of",
-    len(project.resources),
-)
-potential_savings = sum(
-    (
-        os.path.getsize(os.path.join(PROJECT_PATH, r.path))
-        for r in project.resources.values()
-        if os.path.exists(os.path.join(PROJECT_PATH, r.path))
-    )
-)
-print("Potential savings:", format_memory(potential_savings))
 
 
 print("Finished in", datetime.now() - startTime)
