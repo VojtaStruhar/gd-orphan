@@ -3,7 +3,7 @@ import os
 import re
 import sys
 from datetime import datetime
-from typing import Dict, Optional, Set, Any
+from typing import Dict, Optional, Set, Any, List
 
 PROJECT_PATH = sys.argv[1]
 
@@ -24,6 +24,9 @@ startTime = datetime.now()
 if not PROJECT_PATH.endswith("/"):
     PROJECT_PATH += "/"
 
+def is_valid_uid(uid: str) -> bool:
+    parts = uid.split("://")
+    return len(parts) == 2 and parts[0] == "uid" and parts[1].isalnum()
 
 def extract_protocoled_string(prefix: str, text: str) -> str:
     start_index = text.index(prefix)
@@ -84,8 +87,16 @@ class Resource:
             "path": self.path,
             "name": self.name,
             "type": self.type,
-            "referenced_uids": [val for val in self.referenced_uids],
+            "referenced_uids": sorted([val for val in self.referenced_uids]),
         }
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "Resource":
+        r = Resource(d["uid"], d["path"])
+        assert d["name"] == r.name
+        assert d["type"] == r.type
+        r.referenced_uids = set(d["referenced_uids"])
+        return r
 
 class Project:
     def __init__(self) -> None:
@@ -105,6 +116,14 @@ class Project:
             "classnames": self.classnames,
             "resources": {key: value.to_dict() for key, value in self.resources.items()}
         }
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "Project":
+        p = Project()
+        p.main_scene_uid = d["main_scene_uid"]
+        p.classnames = d["classnames"]
+        p.resources = {key: Resource.from_dict(val) for key, val in d["resources"].items()}
+        return p
 
     def process_file(self, root: str, f: str) -> Optional[Resource]:
         if f.endswith(".gd") or f.endswith(".gdshader"):
@@ -183,148 +202,177 @@ class Project:
                             "metadata/_custom_type_script"
                     ):
                         rogue_uid = extract_protocoled_string("uid://", line)
-                        scene_resource.referenced_uids.add(rogue_uid)
+                        if is_valid_uid(rogue_uid):
+                            scene_resource.referenced_uids.add(rogue_uid)
+                        else:
+                            print("Skipping rogue UID:", rogue_uid)
                 except ValueError:
                     # Probably an inline resource
-                    print("Substring index search failed on line:", line)
+                    print("Substring index search failed on line:", line.strip())
 
         return scene_resource
 
 project = Project()
 
-
-for root, dirs, files in os.walk(PROJECT_PATH):
-    relative = root.replace(PROJECT_PATH, "")
-    if any(ignored in relative for ignored in IGNORED_FOLDERS):
-        dirs[:] = []
-        continue
-
-    for f in files:
-        project.process_file(root, f)
-
-
-print("Collected", len(project.resources), "project resources")
-
-# Go over scripts, extract class names
-for script_resource in project.resources.values():
-    if script_resource.type != "script":
-        continue
-
-    with open(os.path.join(PROJECT_PATH, script_resource.path), "r") as script_file:
-        for i in range(5):
-            line = script_file.readline().strip()
-            if "class_name" in line:
-                cn = line[line.index("class_name") :].split()[1]
-                assert cn not in project.classnames
-                project.classnames[cn] = script_resource.uid
-                break
-
-# Also go over Autoloads and register their node names as class names
-with open(os.path.join(PROJECT_PATH, "project.godot")) as project_file:
-    autoloads_section = False
-    while line := project_file.readline():
-        if line.startswith("run/main_scene"):
-            project.main_scene_uid = extract_protocoled_string("uid://", line)
-
-        if line.startswith("["):
-            if autoloads_section:
-                break  # Finished autoloads section, that's what I care about
-            autoloads_section = line.strip() == "[autoload]"
+if os.path.exists("project.json"):
+    print("Loading project.json")
+    with open("project.json", "r") as project_file:
+        data = json.load(project_file)
+        project = Project.from_dict(data)
+else:
+    for root, dirs, files in os.walk(PROJECT_PATH):
+        relative = root.replace(PROJECT_PATH, "")
+        if any(ignored in relative for ignored in IGNORED_FOLDERS):
+            dirs[:] = []
             continue
 
-        if autoloads_section:
-            if len(line.strip()) > 0:
-                cn, file_path = line.strip().split("=")
-                file_path = (
-                    file_path.replace("*", "").replace('"', "").removeprefix("res://")
-                )
-                autoload_uid = next(
-                    (r.uid for r in project.resources.values() if r.path == file_path)
-                )
-                assert project.classnames.get(cn) is None
-                project.classnames[cn] = autoload_uid
+        for f in files:
+            project.process_file(root, f)
 
 
-print(f"Collected {len(project.classnames)} GDScript class_names")
+    print("Collected", len(project.resources), "project resources")
 
-# Go over scripts' contents once more and detect class name usage (regex?)
-
-MISSING_FILES: Set[str] = set()
-
-for script_resource in project.resources.values():
-    if script_resource.type != "script":
-        continue
-
-    for cn, classname_uid in project.classnames.items():
-        if script_resource.uid == classname_uid:
-            continue  # Don't detect on yourself
-
-        classname_detection = re.compile(r"\b" + cn + r"\b")
+    # Go over scripts, extract class names
+    for script_resource in project.resources.values():
+        if script_resource.type != "script":
+            continue
 
         with open(os.path.join(PROJECT_PATH, script_resource.path), "r") as script_file:
-            for line in script_file.readlines():
-                line = line.strip()
-                if line.startswith("#"):
-                    continue
-                if re.search(classname_detection, line):
-                    script_resource.referenced_uids.add(classname_uid)
-                if 'load("' in line:
-                    start_index = line.index("load(") + len('load("')
-                    end_index = line[start_index:].index('")')
-                    loaded_thing = line[start_index : (start_index + end_index)]
-                    if loaded_thing.startswith("uid://"):
-                        if referenced := project.resources.get(loaded_thing):
-                            script_resource.referenced_uids.add(referenced.uid)
-                        # else - track INVALID (nonexistent) loads?
-                    else:
-                        if loaded_thing.startswith("res://"):  # Absolute path load
-                            loaded_thing = loaded_thing.removeprefix("res://")
-                        else:  # Load relative to the script?
-                            dir_path = os.path.dirname(script_resource.path)
-                            while loaded_thing.startswith("../"):
-                                loaded_thing = loaded_thing.removeprefix("../")
-                                dir_path = os.path.dirname(dir_path)
-                            loaded_thing = os.path.join(dir_path, loaded_thing)
+            for i in range(5):
+                line = script_file.readline().strip()
+                if "class_name" in line:
+                    cn = line[line.index("class_name") :].split()[1]
+                    assert cn not in project.classnames
+                    project.classnames[cn] = script_resource.uid
+                    break
 
-                        try:
-                            res = next(
-                                (
-                                    r
-                                    for r in project.resources.values()
-                                    if r.path == loaded_thing
+    # Also go over Autoloads and register their node names as class names
+    with open(os.path.join(PROJECT_PATH, "project.godot")) as project_file:
+        autoloads_section = False
+        while line := project_file.readline():
+            if line.startswith("run/main_scene"):
+                project.main_scene_uid = extract_protocoled_string("uid://", line)
+
+            if line.startswith("["):
+                if autoloads_section:
+                    break  # Finished autoloads section, that's what I care about
+                autoloads_section = line.strip() == "[autoload]"
+                continue
+
+            if autoloads_section:
+                if len(line.strip()) > 0:
+                    cn, file_path = line.strip().split("=")
+                    file_path = (
+                        file_path.replace("*", "").replace('"', "").removeprefix("res://")
+                    )
+                    autoload_uid = next(
+                        (r.uid for r in project.resources.values() if r.path == file_path)
+                    )
+                    assert project.classnames.get(cn) is None
+                    project.classnames[cn] = autoload_uid
+
+
+    print(f"Collected {len(project.classnames)} GDScript class_names")
+
+    # Go over scripts' contents once more and detect class name usage (regex?)
+
+    MISSING_FILES: Set[str] = set()
+
+    for script_resource in project.resources.values():
+        if script_resource.type != "script":
+            continue
+
+        for cn, classname_uid in project.classnames.items():
+            if script_resource.uid == classname_uid:
+                continue  # Don't detect on yourself
+
+            classname_detection = re.compile(r"\b" + cn + r"\b")
+
+            with open(os.path.join(PROJECT_PATH, script_resource.path), "r") as script_file:
+                for line in script_file.readlines():
+                    line = line.strip()
+                    if line.startswith("#"):
+                        continue
+                    if re.search(classname_detection, line):
+                        script_resource.referenced_uids.add(classname_uid)
+                    if 'load("' in line:
+                        start_index = line.index("load(") + len('load("')
+                        end_index = line[start_index:].index('")')
+                        loaded_thing = line[start_index : (start_index + end_index)]
+                        if loaded_thing.startswith("uid://"):
+                            if referenced := project.resources.get(loaded_thing):
+                                script_resource.referenced_uids.add(referenced.uid)
+                            # else - track INVALID (nonexistent) loads?
+                        else:
+                            if loaded_thing.startswith("res://"):  # Absolute path load
+                                loaded_thing = loaded_thing.removeprefix("res://")
+                            else:  # Load relative to the script?
+                                dir_path = os.path.dirname(script_resource.path)
+                                while loaded_thing.startswith("../"):
+                                    loaded_thing = loaded_thing.removeprefix("../")
+                                    dir_path = os.path.dirname(dir_path)
+                                loaded_thing = os.path.join(dir_path, loaded_thing)
+
+                            try:
+                                res = next(
+                                    (
+                                        r
+                                        for r in project.resources.values()
+                                        if r.path == loaded_thing
+                                    )
                                 )
-                            )
-                            script_resource.referenced_uids.add(res.uid)
-                        except StopIteration:
-                            MISSING_FILES.add(loaded_thing)
+                                script_resource.referenced_uids.add(res.uid)
+                            except StopIteration:
+                                MISSING_FILES.add(loaded_thing)
 
-for mf in MISSING_FILES:
-    print("Could not find referenced resource:", mf)
+    for mf in MISSING_FILES:
+        print("Could not find referenced resource:", mf)
 
-print("Finished in", datetime.now() - startTime)
+    print("Finished in", datetime.now() - startTime)
 
 project.save("project.json")
 
 # GENERATE FLOWCHART
 referenced_from_main: Set[str] = set()
-explored: Dict[str, bool] = {}
+
+to_explore: List[str] = [project.main_scene_uid]
+explored: Set[str] = set()
 
 flowchart: str = "flowchart LR\n"
-for res in project.resources.values():
-    for ref in res.referenced_uids:
-        brackets = ("[", "]")
-        name = res.name
-        if res.type == "script":
-            brackets = ("([", "])")
-            name = project.classnames.get(res.uid, res.name)
-        elif res.type == "resource":
-            brackets = ("{{", "}}")
-        elif res.type == "scene":
-            brackets = ("[[", "]]")
-        elif res.type == "image":
-            name = f"fa:fa-image {name}"
+while len(to_explore) > 0:
+    uid = to_explore.pop()
+    for ref_uid in project.resources[uid].referenced_uids:
+        if ref_uid in explored:
+            continue
+        to_explore.append(ref_uid)
+    explored.add(uid)
 
-        flowchart += f"    {res.uid}{brackets[0]}{name}{brackets[1]} --> {ref}\n"
+print("Resourced referenced from main:", len(explored))
 
-with open("flowchart-mermaid.txt", "w") as flowchart_file:
-    flowchart_file.write(flowchart)
+
+
+if True:
+    print("Generating flow chart...")
+    flowchart = "flowchart LR\n"
+    for res_uid in sorted(explored):
+        res = project.resources.get(res_uid)
+        for ref in res.referenced_uids:
+            brackets = ("[", "]")
+            name = res.name
+            if res.type == "script":
+                brackets = ("([", "])")
+                name = project.classnames.get(res.uid, res.name)
+            elif res.type == "resource":
+                brackets = ("{{", "}}")
+            elif res.type == "scene":
+                brackets = ("[[", "]]")
+            elif res.type == "image":
+                name = f"fa:fa-image {name}"
+
+            flowchart += f"    {res.uid}{brackets[0]}{name}{brackets[1]} --> {ref}\n"
+
+    with open("flowchart-mermaid.txt", "w") as flowchart_file:
+        flowchart_file.write(flowchart)
+
+with open("project.json", "w") as project_file:
+    json.dump(project.to_dict(), project_file, indent=4)
