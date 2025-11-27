@@ -333,8 +333,6 @@ else:
 project.save("project.json")
 
 # GENERATE FLOWCHART
-referenced_from_main: Set[str] = set()
-
 to_explore: List[str] = [project.main_scene_uid]
 explored: Set[str] = set()
 
@@ -349,27 +347,38 @@ while len(to_explore) > 0:
 
 print("Resourced referenced from main:", len(explored))
 
+def format_mermaid_resource(res: Resource) -> str:
+    brackets = ("[", "]")
+    name = res.name
+    if res.type == "script":
+        brackets = ("([", "])")
+        if res.uid in project.classnames.values():
+            name = next((key for key, val in project.classnames.items() if val == res.uid))
 
+    elif res.type == "resource":
+        brackets = ("{{", "}}")
+    elif res.type == "scene":
+        brackets = ("[[", "]]")
+    elif res.type == "image":
+        brackets = ("([", "])")
+
+    return f"{res.uid}{brackets[0]}{name}{brackets[1]}"
 
 if True:
     print("Generating flow chart...")
-    flowchart = "flowchart LR\n"
+    flowchart = """---
+config:
+  flowchart:
+    curve: stepBefore
+---
+graph LR
+"""
     for res_uid in sorted(explored):
         res = project.resources.get(res_uid)
         for ref in res.referenced_uids:
-            brackets = ("[", "]")
-            name = res.name
-            if res.type == "script":
-                brackets = ("([", "])")
-                name = project.classnames.get(res.uid, res.name)
-            elif res.type == "resource":
-                brackets = ("{{", "}}")
-            elif res.type == "scene":
-                brackets = ("[[", "]]")
-            elif res.type == "image":
-                name = f"fa:fa-image {name}"
+            ref_resource = project.resources.get(ref)
 
-            flowchart += f"    {res.uid}{brackets[0]}{name}{brackets[1]} --> {ref}\n"
+            flowchart += f"    {format_mermaid_resource(res)} --> {format_mermaid_resource(ref_resource)}\n"
 
     with open("flowchart-mermaid.txt", "w") as flowchart_file:
         flowchart_file.write(flowchart)
