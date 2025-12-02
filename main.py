@@ -19,9 +19,9 @@ IGNORED_FOLDERS = [
 
 # ----------------------------------------
 
-setting_mermaid = False
-setting_load_cached_project = True
-setting_modify_export_presets = True
+setting_mermaid = True
+setting_load_cached_project = False
+setting_modify_export_presets = False
 
 if not PROJECT_PATH.endswith("/"):
     PROJECT_PATH += "/"
@@ -39,12 +39,19 @@ def extract_protocoled_string(prefix: str, text: str) -> str:
     uid = text[start_index : (start_index + end_index)]
     return uid
 
+regex_uid = re.compile("(uid://[a-z0-9]+)")
+
+def extract_uid_regex(line: str) -> Optional[str]:
+    m = regex_uid.search(line)
+    if m:
+        return m.group(0)
+    return None
 
 def format_mermaid_resource(res: Resource) -> str:
     brackets = ("[", "]")
     name = res.name
     if res.type == "script":
-        brackets = ("([", "])")
+        brackets = ("(", ")")
         if res.uid in project.classnames.values():
             name = next((key for key, val in project.classnames.items() if val == res.uid))
 
@@ -125,6 +132,7 @@ class Resource:
 
 class Project:
     def __init__(self) -> None:
+        self._project_path: str = PROJECT_PATH
         self.main_scene_uid: str = ""
         self.classnames: Dict[str, str] = {}
         """ class_name --> UID mapping"""
@@ -137,6 +145,7 @@ class Project:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "project_path": self._project_path,
             "main_scene_uid": self.main_scene_uid,
             "classnames": self.classnames,
             "resources": {key: value.to_dict() for key, value in self.resources.items()}
@@ -144,6 +153,7 @@ class Project:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Project":
+        assert d["project_path"] == PROJECT_PATH, "The loaded Project belongs to a different godot project!"
         p = Project()
         p.main_scene_uid = d["main_scene_uid"]
         p.classnames = d["classnames"]
@@ -226,7 +236,7 @@ class Project:
                     elif "uid://" in line and not line.startswith(
                             "metadata/_custom_type_script"
                     ):
-                        rogue_uid = extract_protocoled_string("uid://", line)
+                        rogue_uid = extract_uid_regex(line)
                         if is_valid_uid(rogue_uid):
                             scene_resource.referenced_uids.add(rogue_uid)
                         else:
@@ -372,13 +382,12 @@ while len(to_explore) > 0:
 print("Resourced referenced from main:", len(explored))
 
 unused_resources = [res for uid, res in project.resources.items() if res.uid not in explored and os.path.exists(res.abspath())]
-unused_abspaths = [res.abspath() for res in unused_resources]
-print("Unused resources:", len(unused_abspaths))
-potential_savings: int = sum([os.path.getsize(unused_path) for unused_path in unused_abspaths])
+print("Unused resources:", len(unused_resources))
+potential_savings: int = sum([os.path.getsize(res.abspath()) for res in unused_resources])
 print("Potential savings:", format_memory(potential_savings))
 
 with open("safe_to_delete.txt", "w") as safe_to_delete:
-    safe_to_delete.write("\n".join(unused_abspaths))
+    safe_to_delete.write("\n".join([res.path for res in unused_resources]))
 
 
 if setting_modify_export_presets:
@@ -413,17 +422,19 @@ if setting_mermaid:
     flowchart = """---
 config:
   flowchart:
-    curve: stepBefore
+    curve: bumpX
 ---
 graph LR
 """
+    flowchart_lines: List[str] = []
     for res_uid in sorted(explored):
         res = project.resources.get(res_uid)
         for ref in res.referenced_uids:
             ref_resource = project.resources.get(ref)
 
-            flowchart += f"    {format_mermaid_resource(res)} --> {format_mermaid_resource(ref_resource)}\n"
+            flowchart_lines.append(f"    {format_mermaid_resource(res)} --> {format_mermaid_resource(ref_resource)}\n")
 
+    flowchart += "".join(sorted(flowchart_lines))
     with open("flowchart-mermaid.txt", "w") as flowchart_file:
         flowchart_file.write(flowchart)
 
