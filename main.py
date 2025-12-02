@@ -240,7 +240,7 @@ class Project:
                         if is_valid_uid(rogue_uid):
                             scene_resource.referenced_uids.add(rogue_uid)
                         else:
-                            print("Skipping rogue UID:", rogue_uid)
+                            print(f"Skipping rogue UID on line: '{line}'")
                 except ValueError:
                     # Probably an inline resource
                     print("Substring index search failed on line:", line.strip())
@@ -373,11 +373,14 @@ explored: Set[str] = set()
 
 while len(to_explore) > 0:
     uid = to_explore.pop()
-    for ref_uid in project.resources[uid].referenced_uids:
-        if ref_uid in explored:
-            continue
-        to_explore.append(ref_uid)
-    explored.add(uid)
+    if resource_to_explore := project.resources.get(uid):
+        for ref_uid in resource_to_explore.referenced_uids:
+            if ref_uid in explored:
+                continue
+            to_explore.append(ref_uid)
+        explored.add(uid)
+    else:
+        print("Referenced uid doesn't exist:", uid)
 
 print("Resourced referenced from main:", len(explored))
 
@@ -430,9 +433,12 @@ graph LR
     for res_uid in sorted(explored):
         res = project.resources.get(res_uid)
         for ref in res.referenced_uids:
-            ref_resource = project.resources.get(ref)
-
-            flowchart_lines.append(f"    {format_mermaid_resource(res)} --> {format_mermaid_resource(ref_resource)}\n")
+            if ref in explored:
+                if ref_resource := project.resources.get(ref):
+                    flowchart_lines.append(f"    {format_mermaid_resource(res)} --> {format_mermaid_resource(ref_resource)}\n")
+                else:
+                    print("Cannot include nonexistent resource in flow chart:", ref)
+            # print("Don't include unexplored references in flow chart:", ref)
 
     flowchart += "".join(sorted(flowchart_lines))
     with open("flowchart-mermaid.txt", "w") as flowchart_file:
