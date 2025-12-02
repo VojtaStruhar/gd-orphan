@@ -4,6 +4,7 @@ import re
 import sys
 from datetime import datetime
 from typing import Dict, Optional, Set, Any, List
+from logging_utils import logger
 
 PROJECT_PATH = sys.argv[1]
 
@@ -105,7 +106,7 @@ class Resource:
             case "lmbake":
                 self.type = "baked lightmap"
             case _:
-                print("UNKNOWN RESOURCE TYPE:", path)
+                logger.error("UNKNOWN RESOURCE TYPE:", path)
 
     def abspath(self) -> str:
         return os.path.join(PROJECT_PATH, self.path)
@@ -168,10 +169,10 @@ class Project:
         elif f.endswith(".tres") or f.endswith(".tscn"):
             return self.process_scene_or_resource(root, f)
         elif os.path.exists(os.path.join(PROJECT_PATH, f + ".import")):
-            print("Falling back to .import path for", f)
+            logger.debug("Falling back to .import path for", f)
             return self.process_imported_file(root, f + ".import")
         else:
-            #print("UNKNOWN FILE:", f)
+            #logger.debug("UNKNOWN FILE:", f)
             pass
 
         return None
@@ -191,7 +192,7 @@ class Project:
         #       to the original file. But as far as I can tell, it's always this one
         image_path = os.path.join(root, f).removesuffix(".import")
         if not os.path.exists(image_path):
-            print("Strange - import file without original file?", image_path)
+            logger.warning("Strange - import file without original file?", image_path)
             return None
 
         with open(os.path.join(root, f), "r") as import_file:
@@ -225,7 +226,7 @@ class Project:
                         elif ext_res := self.process_file(os.path.join(PROJECT_PATH, os.path.dirname(ext_path)), os.path.basename(ext_path)):
                             ext_uid = ext_res.uid
                         else:
-                            print("Skipping external resource", line.strip())
+                            logger.warning("Skipping external resource", line.strip())
                             continue
 
                         if self.resources.get(ext_uid) is None:
@@ -240,17 +241,17 @@ class Project:
                         if is_valid_uid(rogue_uid):
                             scene_resource.referenced_uids.add(rogue_uid)
                         else:
-                            print(f"Skipping rogue UID on line: '{line}'")
+                            logger.warning(f"Skipping rogue UID on line: '{line}'")
                 except ValueError:
                     # Probably an inline resource
-                    print("Substring index search failed on line:", line.strip())
+                    logger.warning("Substring index search failed on line:", line.strip())
 
         return scene_resource
 
 project = Project()
 
 if setting_load_cached_project and os.path.exists("project.json"):
-    print("Loading project.json")
+    logger.info("Loading project.json")
     with open("project.json", "r") as project_file:
         data = json.load(project_file)
         project = Project.from_dict(data)
@@ -266,7 +267,7 @@ else:
             project.process_file(root, f)
 
 
-    print("Collected", len(project.resources), "project resources")
+    logger.info("Collected", len(project.resources), "project resources")
 
     # Go over scripts, extract class names
     for script_resource in project.resources.values():
@@ -308,7 +309,7 @@ else:
                     project.classnames[cn] = autoload_uid
 
 
-    print(f"Collected {len(project.classnames)} GDScript class_names")
+    logger.info(f"Collected {len(project.classnames)} GDScript class_names")
 
     # Go over scripts' contents once more and detect class name usage (regex?)
 
@@ -362,9 +363,9 @@ else:
                                 MISSING_FILES.add(loaded_thing)
 
     for mf in MISSING_FILES:
-        print("Could not find referenced resource:", mf)
+        logger.warning("Could not find referenced resource:", mf)
 
-    print("Finished in", datetime.now() - startTime)
+    logger.info("Finished in", datetime.now() - startTime)
     project.save("project.json")
 
 
@@ -380,14 +381,14 @@ while len(to_explore) > 0:
             to_explore.append(ref_uid)
         explored.add(uid)
     else:
-        print("Referenced uid doesn't exist:", uid)
+        logger.warning("Referenced uid doesn't exist:", uid)
 
-print("Resourced referenced from main:", len(explored))
+logger.debug("Resourced referenced from main:", len(explored))
 
 unused_resources = [res for uid, res in project.resources.items() if res.uid not in explored and os.path.exists(res.abspath())]
-print("Unused resources:", len(unused_resources))
+logger.info("Unused resources:", len(unused_resources))
 potential_savings: int = sum([os.path.getsize(res.abspath()) for res in unused_resources])
-print("Potential savings:", format_memory(potential_savings))
+logger.info("Potential savings:", format_memory(potential_savings))
 
 with open("safe_to_delete.txt", "w") as safe_to_delete:
     safe_to_delete.write("\n".join([res.path for res in unused_resources]))
@@ -395,7 +396,7 @@ with open("safe_to_delete.txt", "w") as safe_to_delete:
 
 if setting_modify_export_presets:
     export_presets_path = os.path.join(PROJECT_PATH, "export_presets.cfg")
-    print("Modifying export presets:", export_presets_path)
+    logger.debug("Modifying export presets:", export_presets_path)
     export_output: List[str] = []
     with open(export_presets_path, "r") as export_presets:
         web_export_section = False
@@ -421,7 +422,7 @@ if setting_modify_export_presets:
 
 
 if setting_mermaid:
-    print("Generating flow chart...")
+    logger.info("Generating flow chart...")
     flowchart = """---
 config:
   flowchart:
@@ -437,8 +438,8 @@ graph LR
                 if ref_resource := project.resources.get(ref):
                     flowchart_lines.append(f"    {format_mermaid_resource(res)} --> {format_mermaid_resource(ref_resource)}\n")
                 else:
-                    print("Cannot include nonexistent resource in flow chart:", ref)
-            # print("Don't include unexplored references in flow chart:", ref)
+                    logger.warning("Cannot include nonexistent resource in flow chart:", ref)
+            # logger.debug("Don't include unexplored references in flow chart:", ref)
 
     flowchart += "".join(sorted(flowchart_lines))
     with open("flowchart-mermaid.txt", "w") as flowchart_file:
