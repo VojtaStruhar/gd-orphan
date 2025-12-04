@@ -20,7 +20,7 @@ IGNORED_FOLDERS = [
 
 # ----------------------------------------
 
-setting_mermaid = True
+setting_mermaid = False
 setting_load_cached_project = False
 setting_modify_export_presets = False
 

@@ -1,4 +1,5 @@
 import logging
+import sys
 
 # Source - https://stackoverflow.com/a
 # Posted by airmind, modified by community. See post 'Timeline' for change history
@@ -50,7 +51,7 @@ class ColoredFormatter(logging.Formatter):
 
 # Custom logger class with multiple destinations
 class ColoredLogger(logging.Logger):
-    FORMAT = "[$BOLD%(name)-20s$RESET][%(levelname)-18s]  %(message)s ($BOLD%(filename)s$RESET:%(lineno)d)"
+    FORMAT = "$BOLD%(name)s$RESET | %(levelname)-18s | $BOLD%(filename)s$RESET:%(lineno)d) - %(message)s"
     COLOR_FORMAT = formatter_message(FORMAT, True)
 
     def __init__(self, name):
@@ -58,7 +59,7 @@ class ColoredLogger(logging.Logger):
 
         color_formatter = ColoredFormatter(self.COLOR_FORMAT)
 
-        console = logging.StreamHandler()
+        console = logging.StreamHandler(sys.stdout)
         console.setFormatter(color_formatter)
 
         self.addHandler(console)
