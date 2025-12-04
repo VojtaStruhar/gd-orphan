@@ -196,6 +196,7 @@ class Project:
         return p
 
     def process_file(self, root: str, f: str) -> Optional[Resource]:
+        assert root.startswith(PROJECT_PATH)
         file_ext = f.split(".")[-1]
         if file_ext == "uid":
             stripped = f.removesuffix(".uid")
@@ -218,9 +219,10 @@ class Project:
         elif f == "project.godot":
             self.project_resource = self.register_opaque_resource(root, f)
             return self.project_resource
-        elif file_ext in ("bin", "res", "lmbake", "cfg", "wasm", "a", "dylib", "dds"):
+        elif file_ext in ("bin", "res", "lmbake", "wasm", "a", "dylib", "dds"):
             return self.register_opaque_resource(root, f)
-
+        elif file_ext == "cfg":
+            return self.process_config_file(root, f)
         elif f.endswith(".import"):
             pass  # Handled per specific resource extension
 
@@ -352,8 +354,8 @@ class Project:
                 line = line.strip()
                 if line.startswith("script="):
                     relative_script_path = line.removeprefix("script=").replace("\"", "")
-                    project_script_path = os.path.join(root, relative_script_path)
-                    script_res = self.process_file(os.path.dirname(project_script_path), os.path.basename(project_script_path))
+                    script_abspath = os.path.join(root, relative_script_path)
+                    script_res = self.process_file(os.path.dirname(script_abspath), os.path.basename(script_abspath))
                     cfg_res.referenced_uids.add(script_res.uid)
 
         return cfg_res
@@ -429,7 +431,7 @@ else:
 
             if plugins_section:
                 if line.startswith("enabled="):
-                    cfg_paths = [item for item in line.split("\"") if item.startswith("res://")]
+                    cfg_paths = [item.replace("res://", PROJECT_PATH) for item in line.split("\"") if item.startswith("res://")]
                     for config_path in cfg_paths:
                         config_res = project.process_file(os.path.dirname(config_path), os.path.basename(config_path))
                         project.project_resource.referenced_uids.add(config_res.uid)
