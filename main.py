@@ -17,6 +17,13 @@ IGNORED_FOLDERS = [
     "android",
     "ios_export",
 ]
+IGNORED_FILES = [
+    ".DS_Store",
+    ".gdignore",
+    ".gitignore",
+    ".gitattributes",
+    "LICENSE",
+]
 
 # ----------------------------------------
 
@@ -24,29 +31,45 @@ setting_mermaid = False
 setting_load_cached_project = False
 setting_modify_export_presets = False
 
+__sequence_key = 0
+
 if not PROJECT_PATH.endswith("/"):
     PROJECT_PATH += "/"
+
+
+def fabricate_uid(prefix: str) -> str:
+    global __sequence_key
+    new_uid = f"uid://{prefix}{__sequence_key}"
+    __sequence_key += 1
+    assert is_valid_uid(new_uid)
+    return new_uid
+
 
 def is_valid_uid(uid: str) -> bool:
     parts = uid.split("://")
     return len(parts) == 2 and parts[0] == "uid" and parts[1].isalnum()
 
+
 def quote(s: str) -> str:
     return '"' + s + '"'
+
 
 def extract_protocoled_string(prefix: str, text: str) -> str:
     start_index = text.index(prefix)
     end_index = text[start_index:].index('"')
-    uid = text[start_index : (start_index + end_index)]
+    uid = text[start_index: (start_index + end_index)]
     return uid
 
+
 regex_uid = re.compile("(uid://[a-z0-9]+)")
+
 
 def extract_uid_regex(line: str) -> Optional[str]:
     m = regex_uid.search(line)
     if m:
         return m.group(0)
     return None
+
 
 def format_mermaid_resource(res: Resource) -> str:
     brackets = ("[", "]")
@@ -64,6 +87,7 @@ def format_mermaid_resource(res: Resource) -> str:
         brackets = ("([", "])")
 
     return f"{res.uid}{brackets[0]}{name}{brackets[1]}"
+
 
 def format_memory(amount: int) -> str:
     if amount < 1_000:
@@ -101,10 +125,16 @@ class Resource:
                 self.type = "3D model"
             case "wav":
                 self.type = "sound"
-            case "gdshader":
+            case "gdshader" | "gdshaderinc":
                 self.type = "shader"
+            case "gdextension":
+                self.type = "GDExtension"
             case "lmbake":
                 self.type = "baked lightmap"
+            case "bin" | "dylib" | "wasm" | "a":
+                self.type = "binary?"
+            case "cfg":
+                self.type = "config"
             case _:
                 logger.error("UNKNOWN RESOURCE TYPE:", path)
 
@@ -130,6 +160,7 @@ class Resource:
         assert d["type"] == r.type
         r.referenced_uids = set(d["referenced_uids"])
         return r
+
 
 class Project:
     def __init__(self) -> None:
@@ -162,17 +193,43 @@ class Project:
         return p
 
     def process_file(self, root: str, f: str) -> Optional[Resource]:
-        if f.endswith(".gd") or f.endswith(".gdshader"):
+        file_ext = f.split(".")[-1]
+        if file_ext == "uid":
+            stripped = f.removesuffix(".uid")
+            if parent := self.process_file(root, stripped):
+                return parent
+
+            logger.error(f"Unhandled `.uid` file: {f}")
+        elif file_ext in ("gd", "gdshader", "gdshaderinc"):
             return self.process_script(root, f)
-        elif f.endswith(".import"):
-            return self.process_imported_file(root, f)
+        elif f.endswith(".gdextension"):
+            return self.process_gdextension(root, f)
+        elif file_ext in ("png", "jpg", "svg", "otf", "ttf", "glb", "webp", "fbx", "blend", "tga", "gltf", "exr", "wav"):
+            if os.path.exists(os.path.join(PROJECT_PATH, root, f + ".import")):
+                return self.process_imported_file(root, f + ".import")
+            logger.warning(f"No `.import` file for {root}/{f}")
+
         elif f.endswith(".tres") or f.endswith(".tscn"):
             return self.process_scene_or_resource(root, f)
-        elif os.path.exists(os.path.join(PROJECT_PATH, f + ".import")):
-            logger.debug("Falling back to .import path for", f)
-            return self.process_imported_file(root, f + ".import")
+
+        elif file_ext in ("bin", "res", "lmbake", "cfg", "wasm", "a", "dylib", "dds"):
+            return self.process_opaque_resource(root, f)
+
+        elif f.endswith(".import"):
+            pass  # Handled per specific resource extension
+
+        elif file_ext in ("gd", "gdshader", "gdshaderinc"):
+            pass  # Handled in the `.uid` branch
+
+        elif file_ext == "cs":
+            pass  # We don't use C#
+
+        elif file_ext in ("md", "txt", "log", "kra", "blend1", "unwrap_cache", "tmp", "depren", "json"):
+            # depren - https://github.com/godotengine/godot/issues/96687
+            pass  # Don't care
+
         else:
-            #logger.debug("UNKNOWN FILE:", f)
+            logger.debug("UNKNOWN FILE:", f)
             pass
 
         return None
@@ -203,6 +260,17 @@ class Project:
                     self.resources[imported_uid] = Resource(imported_uid, image_path)
                     return self.resources[imported_uid]
         return None
+
+    def process_opaque_resource(self, root: str, f: str) -> Optional[Resource]:
+        """
+        Who knows what's in there? I'm creating a fake UID for this resource and hope that something will reference it
+        by path.
+        """
+        fake_uid = os.path.join(root, f).replace(PROJECT_PATH, "res://")
+        gdext_res = Resource(fake_uid, os.path.join(root, f))
+        self.resources[gdext_res.uid] = gdext_res
+        return gdext_res
+
     def process_scene_or_resource(self, root: str, f: str) -> Optional[Resource]:
         with open(os.path.join(root, f), "r") as res_file:
             # This should be defined on the very first row of the file
@@ -223,7 +291,8 @@ class Project:
                         ext_path = extract_protocoled_string("res://", line).removeprefix("res://")
                         if "uid://" in line:
                             ext_uid = extract_protocoled_string("uid://", line)
-                        elif ext_res := self.process_file(os.path.join(PROJECT_PATH, os.path.dirname(ext_path)), os.path.basename(ext_path)):
+                        elif ext_res := self.process_file(os.path.join(PROJECT_PATH, os.path.dirname(ext_path)),
+                                                          os.path.basename(ext_path)):
                             ext_uid = ext_res.uid
                         else:
                             logger.warning("Skipping external resource", line.strip())
@@ -248,6 +317,30 @@ class Project:
 
         return scene_resource
 
+    def process_gdextension(self, root: str, f: str) -> Optional[Resource]:
+        with open(os.path.join(root, f + ".uid"), "r") as gdext_uid_file:
+            gdext_uid = gdext_uid_file.readline().strip()
+            if (gdext_res := self.resources.get(gdext_uid)) is None:
+                gdext_res = Resource(gdext_uid, os.path.join(root, f))
+                self.resources[gdext_res.uid] = gdext_res
+
+
+        with open(os.path.join(root, f), "r") as res_file:
+            # This should be defined on the very first row of the file
+            scene_resource: Optional[Resource] = None
+            for line in res_file.readlines():
+                try:
+                    if "res://" in line:
+                        res_path = extract_protocoled_string("res://", line)
+                        gdext_res.referenced_uids.add(res_path)
+
+                except ValueError:
+                    # Probably an inline resource
+                    logger.warning("Substring index search failed on line:", line.strip())
+
+        return scene_resource
+
+
 project = Project()
 
 if setting_load_cached_project and os.path.exists("project.json"):
@@ -262,10 +355,10 @@ else:
         if any(ignored in relative for ignored in IGNORED_FOLDERS):
             dirs[:] = []
             continue
-
         for f in files:
+            if f in IGNORED_FILES:
+                continue
             project.process_file(root, f)
-
 
     logger.info("Collected", len(project.resources), "project resources")
 
@@ -274,11 +367,15 @@ else:
         if script_resource.type != "script":
             continue
 
-        with open(os.path.join(PROJECT_PATH, script_resource.path), "r") as script_file:
+        if not os.path.exists(script_resource.abspath()):
+            logger.warning("Nonexistent script:", script_resource.name)
+            continue
+
+        with open(script_resource.abspath(), "r") as script_file:
             for i in range(5):
                 line = script_file.readline().strip()
                 if "class_name" in line:
-                    cn = line[line.index("class_name") :].split()[1]
+                    cn = line[line.index("class_name"):].split()[1]
                     assert cn not in project.classnames
                     project.classnames[cn] = script_resource.uid
                     break
@@ -286,14 +383,14 @@ else:
     # Also go over Autoloads and register their node names as class names
     with open(os.path.join(PROJECT_PATH, "project.godot")) as project_file:
         autoloads_section = False
+        plugins_section = False
         while line := project_file.readline():
             if line.startswith("run/main_scene"):
                 project.main_scene_uid = extract_protocoled_string("uid://", line)
 
             if line.startswith("["):
-                if autoloads_section:
-                    break  # Finished autoloads section, that's what I care about
                 autoloads_section = line.strip() == "[autoload]"
+                plugins_section = line.strip() == "[editor_plugins]"
                 continue
 
             if autoloads_section:
@@ -309,6 +406,18 @@ else:
                     project.classnames[cn] = autoload_uid
 
 
+            if plugins_section:
+                if line.startswith("enabled="):
+                    cfg_paths = [item for item in line.split("\"") if item.startswith("res://")]
+                    for config_path in cfg_paths:
+                        config_path = os.path.join(PROJECT_PATH, config_path.removeprefix("res://"))
+                        with open(config_path, "r") as config_file:
+                            for line in config_file.readlines():
+                                if line.startswith("script="):
+                                    script_file = line.strip().removeprefix("script=").replace('"', '')
+                                    logger.info("Processing script from a config file", script_file)
+                                    project.process_file(os.path.dirname(config_path), script_file)
+
     logger.info(f"Collected {len(project.classnames)} GDScript class_names")
 
     # Go over scripts' contents once more and detect class name usage (regex?)
@@ -318,6 +427,9 @@ else:
     for script_resource in project.resources.values():
         if script_resource.type != "script":
             continue
+        if not os.path.exists(script_resource.abspath()):
+            logger.warning("Nonexistent script:", script_resource.name)
+            continue
 
         for cn, classname_uid in project.classnames.items():
             if script_resource.uid == classname_uid:
@@ -325,7 +437,7 @@ else:
 
             classname_detection = re.compile(r"\b" + cn + r"\b")
 
-            with open(os.path.join(PROJECT_PATH, script_resource.path), "r") as script_file:
+            with open(script_resource.abspath(), "r") as script_file:
                 for line in script_file.readlines():
                     line = line.strip()
                     if line.startswith("#"):
@@ -335,7 +447,7 @@ else:
                     if 'load("' in line:
                         start_index = line.index("load(") + len('load("')
                         end_index = line[start_index:].index('")')
-                        loaded_thing = line[start_index : (start_index + end_index)]
+                        loaded_thing = line[start_index: (start_index + end_index)]
                         if loaded_thing.startswith("uid://"):
                             if referenced := project.resources.get(loaded_thing):
                                 script_resource.referenced_uids.add(loaded_thing)
@@ -368,7 +480,6 @@ else:
     logger.info("Finished in", datetime.now() - startTime)
     project.save("project.json")
 
-
 to_explore: List[str] = [project.main_scene_uid]
 explored: Set[str] = set()
 
@@ -385,14 +496,14 @@ while len(to_explore) > 0:
 
 logger.debug("Resourced referenced from main:", len(explored))
 
-unused_resources = [res for uid, res in project.resources.items() if res.uid not in explored and os.path.exists(res.abspath())]
+unused_resources = [res for uid, res in project.resources.items() if
+                    res.uid not in explored and os.path.exists(res.abspath())]
 logger.info("Unused resources:", len(unused_resources))
 potential_savings: int = sum([os.path.getsize(res.abspath()) for res in unused_resources])
 logger.info("Potential savings:", format_memory(potential_savings))
 
 with open("safe_to_delete.txt", "w") as safe_to_delete:
-    safe_to_delete.write("\n".join([res.path for res in unused_resources]))
-
+    safe_to_delete.write("\n".join(sorted([res.path for res in unused_resources])))
 
 if setting_modify_export_presets:
     export_presets_path = os.path.join(PROJECT_PATH, "export_presets.cfg")
@@ -405,11 +516,11 @@ if setting_modify_export_presets:
             if line.startswith("name="):
                 web_export_section = line.split("=")[1].replace('"', '').strip() == "Web"
 
-
             if web_export_section:
                 if line.startswith("export_filter="):
                     export_output.append('export_filter="exclude"')
-                    export_output.append('export_files=PackedStringArray(' + ", ".join([quote("res://" + res.path) for res in unused_resources]) + ")")
+                    export_output.append('export_files=PackedStringArray(' + ", ".join(
+                        [quote("res://" + res.path) for res in unused_resources]) + ")")
                     continue
 
                 if line.startswith("export_files="):
@@ -419,7 +530,6 @@ if setting_modify_export_presets:
 
     with open(export_presets_path, "w") as export_presets:
         export_presets.write("\n".join(export_output))
-
 
 if setting_mermaid:
     logger.info("Generating flow chart...")
@@ -436,7 +546,8 @@ graph LR
         for ref in res.referenced_uids:
             if ref in explored:
                 if ref_resource := project.resources.get(ref):
-                    flowchart_lines.append(f"    {format_mermaid_resource(res)} --> {format_mermaid_resource(ref_resource)}\n")
+                    flowchart_lines.append(
+                        f"    {format_mermaid_resource(res)} --> {format_mermaid_resource(ref_resource)}\n")
                 else:
                     logger.warning("Cannot include nonexistent resource in flow chart:", ref)
             # logger.debug("Don't include unexplored references in flow chart:", ref)
