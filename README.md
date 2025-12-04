@@ -2,5 +2,6 @@
 
 ## TODO
 
-- [ ] Shader includes
+- [x] Shader includes
 - [x] Parse Config files
+- [ ] Class inheritance

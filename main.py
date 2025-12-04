@@ -27,7 +27,7 @@ IGNORED_FILES = [
 
 # ----------------------------------------
 
-setting_mermaid = False
+setting_mermaid = True
 setting_load_cached_project = False
 setting_modify_export_presets = False
 
@@ -219,15 +219,15 @@ class Project:
         elif f == "project.godot":
             self.project_resource = self.register_opaque_resource(root, f)
             return self.project_resource
+
         elif file_ext in ("bin", "res", "lmbake", "wasm", "a", "dylib", "dds"):
             return self.register_opaque_resource(root, f)
+
         elif file_ext == "cfg":
             return self.process_config_file(root, f)
+
         elif f.endswith(".import"):
             pass  # Handled per specific resource extension
-
-        elif file_ext in ("gd", "gdshader", "gdshaderinc"):
-            pass  # Handled in the `.uid` branch
 
         elif file_ext == "cs":
             pass  # We don't use C#
@@ -444,54 +444,71 @@ else:
     MISSING_FILES: Set[str] = set()
 
     for script_resource in project.resources.values():
-        if script_resource.type != "script":
-            continue
         if not os.path.exists(script_resource.abspath()):
-            logger.warning("Nonexistent script:", script_resource.name)
+            logger.warning("Nonexistent resource:", script_resource.name)
             continue
+        if script_resource.type == "script":
+            for cn, classname_uid in project.classnames.items():
+                if script_resource.uid == classname_uid:
+                    continue  # Don't detect on yourself
 
-        for cn, classname_uid in project.classnames.items():
-            if script_resource.uid == classname_uid:
-                continue  # Don't detect on yourself
+                classname_detection = re.compile(r"\b" + cn + r"\b")
 
-            classname_detection = re.compile(r"\b" + cn + r"\b")
+                with open(script_resource.abspath(), "r") as script_file:
+                    for line in script_file.readlines():
+                        line = line.strip()
+                        if line.startswith("#"):
+                            continue
+                        if re.search(classname_detection, line):
+                            script_resource.referenced_uids.add(classname_uid)
+                        if 'load("' in line:
+                            start_index = line.index("load(") + len('load("')
+                            end_index = line[start_index:].index('")')
+                            loaded_thing = line[start_index: (start_index + end_index)]
+                            if loaded_thing.startswith("uid://"):
+                                if referenced := project.resources.get(loaded_thing):
+                                    script_resource.referenced_uids.add(loaded_thing)
+                                # else - track INVALID (nonexistent) loads?
+                            else:
+                                if loaded_thing.startswith("res://"):  # Absolute path load
+                                    loaded_thing = loaded_thing.removeprefix("res://")
+                                else:  # Load relative to the script?
+                                    dir_path = os.path.dirname(script_resource.path)
+                                    while loaded_thing.startswith("../"):
+                                        loaded_thing = loaded_thing.removeprefix("../")
+                                        dir_path = os.path.dirname(dir_path)
+                                    loaded_thing = os.path.join(dir_path, loaded_thing)
 
-            with open(script_resource.abspath(), "r") as script_file:
-                for line in script_file.readlines():
-                    line = line.strip()
-                    if line.startswith("#"):
-                        continue
-                    if re.search(classname_detection, line):
-                        script_resource.referenced_uids.add(classname_uid)
-                    if 'load("' in line:
-                        start_index = line.index("load(") + len('load("')
-                        end_index = line[start_index:].index('")')
-                        loaded_thing = line[start_index: (start_index + end_index)]
-                        if loaded_thing.startswith("uid://"):
-                            if referenced := project.resources.get(loaded_thing):
-                                script_resource.referenced_uids.add(loaded_thing)
-                            # else - track INVALID (nonexistent) loads?
-                        else:
-                            if loaded_thing.startswith("res://"):  # Absolute path load
-                                loaded_thing = loaded_thing.removeprefix("res://")
-                            else:  # Load relative to the script?
-                                dir_path = os.path.dirname(script_resource.path)
-                                while loaded_thing.startswith("../"):
-                                    loaded_thing = loaded_thing.removeprefix("../")
-                                    dir_path = os.path.dirname(dir_path)
-                                loaded_thing = os.path.join(dir_path, loaded_thing)
-
-                            try:
-                                res = next(
-                                    (
-                                        r
-                                        for r in project.resources.values()
-                                        if r.path == loaded_thing
+                                try:
+                                    res = next(
+                                        (
+                                            r
+                                            for r in project.resources.values()
+                                            if r.path == loaded_thing
+                                        )
                                     )
-                                )
-                                script_resource.referenced_uids.add(res.uid)
-                            except StopIteration:
-                                MISSING_FILES.add(loaded_thing)
+                                    script_resource.referenced_uids.add(res.uid)
+                                except StopIteration:
+                                    MISSING_FILES.add(loaded_thing)
+        elif script_resource.type == "shader":
+            with open(script_resource.abspath(), "r") as shader_file:
+                for line in shader_file.readlines():
+                    line = line.strip()
+                    if line.startswith("#include "):
+                        logger.debug(line)
+                        between_quotes = line.split('"')[1]
+                        if between_quotes.startswith("res://"):
+                            include_res = next(res for res in project.resources.values() if res.path == between_quotes.removeprefix("res://"))
+                        elif between_quotes.startswith("uid://"):
+                            include_res = project.resources.get(between_quotes)
+                        else: # relative path lookup
+                            dir_path = os.path.dirname(script_resource.path)
+                            while between_quotes.startswith("../"):
+                                between_quotes = between_quotes.removeprefix("../")
+                                dir_path = os.path.dirname(dir_path)
+                            between_quotes = os.path.join(dir_path, between_quotes)
+                            include_res = next(res for res in project.resources.values() if res.path == between_quotes)
+                        continue
 
     for mf in MISSING_FILES:
         logger.warning("Could not find referenced resource:", mf)
