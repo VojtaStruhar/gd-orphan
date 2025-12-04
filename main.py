@@ -135,6 +135,8 @@ class Resource:
                 self.type = "binary?"
             case "cfg":
                 self.type = "config"
+            case "godot":
+                self.type = "Project"
             case _:
                 logger.error("UNKNOWN RESOURCE TYPE:", path)
 
@@ -165,6 +167,7 @@ class Resource:
 class Project:
     def __init__(self) -> None:
         self._project_path: str = PROJECT_PATH
+        self.project_resource: Resource = None
         self.main_scene_uid: str = ""
         self.classnames: Dict[str, str] = {}
         """ class_name --> UID mapping"""
@@ -201,19 +204,22 @@ class Project:
 
             logger.error(f"Unhandled `.uid` file: {f}")
         elif file_ext in ("gd", "gdshader", "gdshaderinc"):
-            return self.process_script(root, f)
+            return self.register_script(root, f)
         elif f.endswith(".gdextension"):
             return self.process_gdextension(root, f)
+
         elif file_ext in ("png", "jpg", "svg", "otf", "ttf", "glb", "webp", "fbx", "blend", "tga", "gltf", "exr", "wav"):
             if os.path.exists(os.path.join(PROJECT_PATH, root, f + ".import")):
-                return self.process_imported_file(root, f + ".import")
+                return self.register_imported_file(root, f + ".import")
             logger.warning(f"No `.import` file for {root}/{f}")
 
         elif f.endswith(".tres") or f.endswith(".tscn"):
             return self.process_scene_or_resource(root, f)
-
+        elif f == "project.godot":
+            self.project_resource = self.register_opaque_resource(root, f)
+            return self.project_resource
         elif file_ext in ("bin", "res", "lmbake", "cfg", "wasm", "a", "dylib", "dds"):
-            return self.process_opaque_resource(root, f)
+            return self.register_opaque_resource(root, f)
 
         elif f.endswith(".import"):
             pass  # Handled per specific resource extension
@@ -229,12 +235,12 @@ class Project:
             pass  # Don't care
 
         else:
-            logger.debug("UNKNOWN FILE:", f)
+            logger.error("UNKNOWN FILE:", f)
             pass
 
         return None
 
-    def process_script(self, root: str, f: str) -> Optional[Resource]:
+    def register_script(self, root: str, f: str) -> Optional[Resource]:
         uid_path = os.path.join(root, f + ".uid")
         if os.path.exists(uid_path):
             with open(uid_path) as uid_file:
@@ -244,12 +250,12 @@ class Project:
             return self.resources[script_uid]
         return None
 
-    def process_imported_file(self, root: str, f: str) -> Optional[Resource]:
+    def register_imported_file(self, root: str, f: str) -> Optional[Resource]:
         # NOTE: Actually, .import files have `deps/source` attribute in them that points
         #       to the original file. But as far as I can tell, it's always this one
-        image_path = os.path.join(root, f).removesuffix(".import")
-        if not os.path.exists(image_path):
-            logger.warning("Strange - import file without original file?", image_path)
+        source_path = os.path.join(root, f).removesuffix(".import")
+        if not os.path.exists(source_path):
+            logger.warning("Strange - import file without original file?", source_path)
             return None
 
         with open(os.path.join(root, f), "r") as import_file:
@@ -257,18 +263,19 @@ class Project:
                 line = line.strip()
                 if line.startswith('uid="'):
                     imported_uid = line[len('uid="'): -1]
-                    self.resources[imported_uid] = Resource(imported_uid, image_path)
+                    self.resources[imported_uid] = Resource(imported_uid, source_path)
                     return self.resources[imported_uid]
         return None
 
-    def process_opaque_resource(self, root: str, f: str) -> Optional[Resource]:
+    def register_opaque_resource(self, root: str, f: str) -> Optional[Resource]:
         """
         Who knows what's in there? I'm creating a fake UID for this resource and hope that something will reference it
         by path.
         """
         fake_uid = os.path.join(root, f).replace(PROJECT_PATH, "res://")
-        gdext_res = Resource(fake_uid, os.path.join(root, f))
-        self.resources[gdext_res.uid] = gdext_res
+        if (gdext_res := self.resources.get(fake_uid)) is None:
+            gdext_res = Resource(fake_uid, os.path.join(root, f))
+            self.resources[gdext_res.uid] = gdext_res
         return gdext_res
 
     def process_scene_or_resource(self, root: str, f: str) -> Optional[Resource]:
@@ -326,8 +333,6 @@ class Project:
 
 
         with open(os.path.join(root, f), "r") as res_file:
-            # This should be defined on the very first row of the file
-            scene_resource: Optional[Resource] = None
             for line in res_file.readlines():
                 try:
                     if "res://" in line:
@@ -338,7 +343,20 @@ class Project:
                     # Probably an inline resource
                     logger.warning("Substring index search failed on line:", line.strip())
 
-        return scene_resource
+        return gdext_res
+
+    def process_config_file(self, root: str, f: str) -> Optional[Resource]:
+        cfg_res = self.register_opaque_resource(root, f)
+        with open(cfg_res.abspath(), "r") as config_file:
+            for line in config_file.readlines():
+                line = line.strip()
+                if line.startswith("script="):
+                    relative_script_path = line.removeprefix("script=").replace("\"", "")
+                    project_script_path = os.path.join(root, relative_script_path)
+                    script_res = self.process_file(os.path.dirname(project_script_path), os.path.basename(project_script_path))
+                    cfg_res.referenced_uids.add(script_res.uid)
+
+        return cfg_res
 
 
 project = Project()
@@ -380,13 +398,15 @@ else:
                     project.classnames[cn] = script_resource.uid
                     break
 
+    # project.godot
     # Also go over Autoloads and register their node names as class names
-    with open(os.path.join(PROJECT_PATH, "project.godot")) as project_file:
+    with open(project.project_resource.abspath()) as project_file:
         autoloads_section = False
         plugins_section = False
         while line := project_file.readline():
             if line.startswith("run/main_scene"):
                 project.main_scene_uid = extract_protocoled_string("uid://", line)
+                project.project_resource.referenced_uids.add(project.main_scene_uid)
 
             if line.startswith("["):
                 autoloads_section = line.strip() == "[autoload]"
@@ -404,19 +424,16 @@ else:
                     )
                     assert project.classnames.get(cn) is None
                     project.classnames[cn] = autoload_uid
+                    project.project_resource.referenced_uids.add(autoload_uid)
 
 
             if plugins_section:
                 if line.startswith("enabled="):
                     cfg_paths = [item for item in line.split("\"") if item.startswith("res://")]
                     for config_path in cfg_paths:
-                        config_path = os.path.join(PROJECT_PATH, config_path.removeprefix("res://"))
-                        with open(config_path, "r") as config_file:
-                            for line in config_file.readlines():
-                                if line.startswith("script="):
-                                    script_file = line.strip().removeprefix("script=").replace('"', '')
-                                    logger.info("Processing script from a config file", script_file)
-                                    project.process_file(os.path.dirname(config_path), script_file)
+                        config_res = project.process_file(os.path.dirname(config_path), os.path.basename(config_path))
+                        project.project_resource.referenced_uids.add(config_res.uid)
+
 
     logger.info(f"Collected {len(project.classnames)} GDScript class_names")
 
@@ -480,7 +497,7 @@ else:
     logger.info("Finished in", datetime.now() - startTime)
     project.save("project.json")
 
-to_explore: List[str] = [project.main_scene_uid]
+to_explore: List[str] = [project.project_resource.uid]
 explored: Set[str] = set()
 
 while len(to_explore) > 0:
