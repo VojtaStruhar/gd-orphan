@@ -29,7 +29,7 @@ IGNORED_FILES = [
 
 setting_mermaid = False
 setting_load_cached_project = False
-setting_modify_export_presets = False
+setting_modify_export_presets = True
 
 __sequence_key = 0
 
@@ -193,6 +193,7 @@ class Project:
         p.main_scene_uid = d["main_scene_uid"]
         p.classnames = d["classnames"]
         p.resources = {key: Resource.from_dict(val) for key, val in d["resources"].items()}
+        p.project_resource = p.resources["res://project.godot"]
         return p
 
     def process_file(self, root: str, f: str) -> Optional[Resource]:
@@ -312,9 +313,7 @@ class Project:
 
                         scene_resource.referenced_uids.add(ext_uid)
 
-                    elif "uid://" in line and not line.startswith(
-                            "metadata/_custom_type_script"
-                    ):
+                    elif "uid://" in line:
                         rogue_uid = extract_uid_regex(line)
                         if is_valid_uid(rogue_uid):
                             scene_resource.referenced_uids.add(rogue_uid)
@@ -419,13 +418,31 @@ else:
             continue
 
         with open(script_resource.abspath(), "r") as script_file:
-            for i in range(5):
-                line = script_file.readline().strip()
-                if "class_name" in line:
-                    cn = line[line.index("class_name"):].split()[1]
-                    assert cn not in project.classnames
-                    project.classnames[cn] = script_resource.uid
-                    break
+            parent_classname = ""
+            while line := script_file.readline():
+                line = line.strip()
+                if line.startswith("#"):
+                    continue
+
+                words = line.split()
+                try:
+                    if words[0] == "class_name":
+                        cn = words[words.index("class_name") + 1]
+                        assert cn not in project.classnames
+                        project.classnames[cn] = script_resource.uid
+                        parent_classname = cn
+                    elif words[0] == "class":
+                        cn = words[words.index("class") + 1]
+                        if parent_classname:
+                            cn = parent_classname + "." + cn
+
+                        if cn not in project.classnames:
+                            project.classnames[cn] = script_resource.uid
+                        else:
+                            logger.debug(f"Inner class {cn} of {script_resource.name} already defined in {project.resources[project.classnames[cn]].name}")
+
+                except IndexError:
+                    pass
 
     # project.godot
     # Also go over Autoloads and register their node names as class names
