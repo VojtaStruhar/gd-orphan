@@ -27,7 +27,7 @@ IGNORED_FILES = [
 
 # ----------------------------------------
 
-setting_mermaid = True
+setting_mermaid = False
 setting_load_cached_project = False
 setting_modify_export_presets = False
 
@@ -133,7 +133,7 @@ class Resource:
                 self.type = "baked lightmap"
             case "bin" | "dylib" | "wasm" | "a":
                 self.type = "binary?"
-            case "cfg":
+            case "cfg" | "json":
                 self.type = "config"
             case "godot":
                 self.type = "Project"
@@ -220,7 +220,7 @@ class Project:
             self.project_resource = self.register_opaque_resource(root, f)
             return self.project_resource
 
-        elif file_ext in ("bin", "res", "lmbake", "wasm", "a", "dylib", "dds"):
+        elif file_ext in ("bin", "res", "lmbake", "wasm", "a", "dylib", "dds", "json"):
             return self.register_opaque_resource(root, f)
 
         elif file_ext == "cfg":
@@ -232,7 +232,7 @@ class Project:
         elif file_ext == "cs":
             pass  # We don't use C#
 
-        elif file_ext in ("md", "txt", "log", "kra", "blend1", "unwrap_cache", "tmp", "depren", "json"):
+        elif file_ext in ("md", "txt", "log", "kra", "blend1", "unwrap_cache", "tmp", "depren"):
             # depren - https://github.com/godotengine/godot/issues/96687
             pass  # Don't care
 
@@ -360,6 +360,33 @@ class Project:
 
         return cfg_res
 
+    def lookup_resource_by_path(self, res_path: str) -> Optional[Resource]:
+        assert res_path.startswith("res://"), "supply bare project-relative path"
+
+        if opaque_resource := self.resources.get(res_path):
+            return opaque_resource
+
+        try:
+            return next(
+                (
+                    r
+                    for r in self.resources.values()
+                    if r.path == res_path.removeprefix("res://")
+                )
+            )
+        except StopIteration:
+            return None
+
+    def get_res_path_from_relative(self, path: str, relative_to: Resource) -> str:
+        """
+        For when a script or a shader loads / #includes something with relative path
+        """
+        assert relative_to.type in ("script", "shader")
+        parent = os.path.dirname(relative_to.path)
+        while path.startswith("../"):
+            path = path.removeprefix("../")
+            parent = os.path.dirname(parent)
+        return "res://" + os.path.join(parent, path)
 
 project = Project()
 
@@ -461,53 +488,45 @@ else:
                             continue
                         if re.search(classname_detection, line):
                             script_resource.referenced_uids.add(classname_uid)
-                        if 'load("' in line:
+
+                        if "\"uid://" in line:
+                            random_referenced_uid = extract_protocoled_string("uid://", line)
+                            script_resource.referenced_uids.add(random_referenced_uid)
+                        elif "\"res://" in line:
+                            res_path = extract_protocoled_string("res://", line)
+                            res = project.lookup_resource_by_path(res_path)
+                            if res:
+                                script_resource.referenced_uids.add(res.uid)
+                            else:
+                                #logger.warning("Invalid 'res://' reference:", line.strip())
+                                MISSING_FILES.add(res_path)
+                        elif "load(\"" in line: # relative path load
                             start_index = line.index("load(") + len('load("')
                             end_index = line[start_index:].index('")')
                             loaded_thing = line[start_index: (start_index + end_index)]
-                            if loaded_thing.startswith("uid://"):
-                                if referenced := project.resources.get(loaded_thing):
-                                    script_resource.referenced_uids.add(loaded_thing)
-                                # else - track INVALID (nonexistent) loads?
+                            loaded_thing = project.get_res_path_from_relative(loaded_thing, script_resource)
+                            res = project.lookup_resource_by_path(loaded_thing)
+                            if res:
+                                script_resource.referenced_uids.add(res.uid)
                             else:
-                                if loaded_thing.startswith("res://"):  # Absolute path load
-                                    loaded_thing = loaded_thing.removeprefix("res://")
-                                else:  # Load relative to the script?
-                                    dir_path = os.path.dirname(script_resource.path)
-                                    while loaded_thing.startswith("../"):
-                                        loaded_thing = loaded_thing.removeprefix("../")
-                                        dir_path = os.path.dirname(dir_path)
-                                    loaded_thing = os.path.join(dir_path, loaded_thing)
+                                #logger.warning("Strange load call:", line.strip())
+                                MISSING_FILES.add(loaded_thing)
 
-                                try:
-                                    res = next(
-                                        (
-                                            r
-                                            for r in project.resources.values()
-                                            if r.path == loaded_thing
-                                        )
-                                    )
-                                    script_resource.referenced_uids.add(res.uid)
-                                except StopIteration:
-                                    MISSING_FILES.add(loaded_thing)
         elif script_resource.type == "shader":
             with open(script_resource.abspath(), "r") as shader_file:
                 for line in shader_file.readlines():
                     line = line.strip()
                     if line.startswith("#include "):
-                        logger.debug(line)
                         between_quotes = line.split('"')[1]
                         if between_quotes.startswith("res://"):
-                            include_res = next(res for res in project.resources.values() if res.path == between_quotes.removeprefix("res://"))
+                            include_res = project.lookup_resource_by_path(between_quotes.removeprefix("res://"))
                         elif between_quotes.startswith("uid://"):
                             include_res = project.resources.get(between_quotes)
                         else: # relative path lookup
-                            dir_path = os.path.dirname(script_resource.path)
-                            while between_quotes.startswith("../"):
-                                between_quotes = between_quotes.removeprefix("../")
-                                dir_path = os.path.dirname(dir_path)
-                            between_quotes = os.path.join(dir_path, between_quotes)
-                            include_res = next(res for res in project.resources.values() if res.path == between_quotes)
+                            included_path = project.get_res_path_from_relative(between_quotes, script_resource)
+                            include_res = project.lookup_resource_by_path(included_path)
+
+                        script_resource.referenced_uids.add(include_res.uid)
                         continue
 
     for mf in MISSING_FILES:
