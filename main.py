@@ -22,6 +22,7 @@ IGNORED_FILES = [
     ".gdignore",
     ".gitignore",
     ".gitattributes",
+    ".editorconfig",
     "LICENSE",
 ]
 
@@ -29,7 +30,7 @@ IGNORED_FILES = [
 
 setting_mermaid = False
 setting_load_cached_project = False
-setting_modify_export_presets = True
+setting_modify_export_presets = False
 
 __sequence_key = 0
 
