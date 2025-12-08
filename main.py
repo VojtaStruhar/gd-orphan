@@ -85,7 +85,8 @@ def format_memory(amount: int) -> str:
 class Resource:
     def __init__(self, unique_id: str, path: str):
         self.uid = unique_id
-        self.path = path.removeprefix(PROJECT_PATH)
+        assert not path.startswith("/")
+        self.path = path
         self.name = self.path.split("/")[-1]
         self.type = ""
         self.referenced_uids: Set[str] = set()
@@ -120,9 +121,6 @@ class Resource:
             case _:
                 logger.error("UNKNOWN RESOURCE TYPE:", path)
 
-    def abspath(self) -> str:
-        return os.path.join(PROJECT_PATH, self.path)
-
     def __str__(self):
         return f"<R ({self.type}) '{self.name}'>"
 
@@ -146,6 +144,8 @@ class Resource:
 
 class Project:
     def __init__(self, project_path) -> None:
+        if not project_path.endswith("/"):
+            project_path += "/"
         self._project_path: str = project_path
         self.project_resource: Optional[Resource] = None
         self.main_scene_uid: str = ""
@@ -153,9 +153,6 @@ class Project:
         """ class_name --> UID mapping"""
         self.resources: Dict[str, Resource] = {}
         """ UID --> Scene/Script/Texture/... mapping"""
-        # HACK
-        global PROJECT_PATH
-        PROJECT_PATH = project_path
 
     def save(self, filepath: str) -> None:
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -184,8 +181,8 @@ class Project:
         return p
 
     def process_file(self, root: str, f: str) -> Optional[Resource]:
-        assert root.startswith(PROJECT_PATH), (
-            f"Invalid root path? {root}, {PROJECT_PATH}"
+        assert root.startswith(self._project_path), (
+            f"Invalid root path? {root}, {self._project_path}"
         )
         file_ext = f.split(".")[-1]
         if file_ext == "uid":
@@ -214,7 +211,7 @@ class Project:
             "exr",
             "wav",
         ):
-            if os.path.exists(os.path.join(PROJECT_PATH, root, f + ".import")):
+            if os.path.exists(os.path.join(self._project_path, root, f + ".import")):
                 return self.register_imported_file(root, f + ".import")
             logger.warning(f"No `.import` file for {root}/{f}")
 
@@ -261,7 +258,7 @@ class Project:
             with open(uid_path) as uid_file:
                 script_uid = uid_file.readline().strip()
 
-            self.resources[script_uid] = Resource(script_uid, os.path.join(root, f))
+            self.resources[script_uid] = Resource(script_uid, os.path.join(root, f).removeprefix(self._project_path))
             return self.resources[script_uid]
         return None
 
@@ -278,7 +275,7 @@ class Project:
                 line = line.strip()
                 if line.startswith('uid="'):
                     imported_uid = line[len('uid="') : -1]
-                    self.resources[imported_uid] = Resource(imported_uid, source_path)
+                    self.resources[imported_uid] = Resource(imported_uid, source_path.removeprefix(self._project_path))
                     return self.resources[imported_uid]
         return None
 
@@ -287,9 +284,9 @@ class Project:
         Who knows what's in there? I'm creating a fake UID for this resource and hope that something will reference it
         by path.
         """
-        res_prefixed_path = os.path.join(root, f).replace(PROJECT_PATH, "res://")
+        res_prefixed_path = os.path.join(root, f).replace(self._project_path, "res://")
         if (gdext_res := self.resources.get(res_prefixed_path)) is None:
-            gdext_res = Resource(res_prefixed_path, os.path.join(root, f))
+            gdext_res = Resource(res_prefixed_path, os.path.join(root, f).removeprefix(self._project_path))
             self.resources[gdext_res.uid] = gdext_res
         return gdext_res
 
@@ -301,12 +298,12 @@ class Project:
                 try:
                     if line.startswith("[gd_scene"):
                         scene_uid = extract_protocoled_string("uid://", line)
-                        scene_resource = Resource(scene_uid, os.path.join(root, f))
+                        scene_resource = Resource(scene_uid, os.path.join(root, f).removeprefix(self._project_path))
                         self.resources[scene_uid] = scene_resource
 
                     elif line.startswith("[gd_resource"):  # .tres
                         res_uid = extract_protocoled_string("uid://", line)
-                        scene_resource = Resource(res_uid, os.path.join(root, f))
+                        scene_resource = Resource(res_uid, os.path.join(root, f).removeprefix(self._project_path))
                         self.resources[res_uid] = scene_resource
 
                     elif line.startswith("[ext_resource"):
@@ -316,7 +313,7 @@ class Project:
                         if "uid://" in line:
                             ext_uid = extract_protocoled_string("uid://", line)
                         elif ext_res := self.process_file(
-                            os.path.join(PROJECT_PATH, os.path.dirname(ext_path)),
+                            os.path.join(self._project_path, os.path.dirname(ext_path)),
                             os.path.basename(ext_path),
                         ):
                             ext_uid = ext_res.uid
@@ -349,7 +346,7 @@ class Project:
         with open(os.path.join(root, f + ".uid"), "r") as gdext_uid_file:
             gdext_uid = gdext_uid_file.readline().strip()
             if (gdext_res := self.resources.get(gdext_uid)) is None:
-                gdext_res = Resource(gdext_uid, os.path.join(root, f))
+                gdext_res = Resource(gdext_uid, os.path.join(root, f).removeprefix(self._project_path))
                 self.resources[gdext_res.uid] = gdext_res
 
         with open(os.path.join(root, f), "r") as res_file:
@@ -369,7 +366,7 @@ class Project:
 
     def process_config_file(self, root: str, f: str) -> Resource:
         cfg_res = self.register_opaque_resource(root, f)
-        with open(cfg_res.abspath(), "r") as config_file:
+        with open(os.path.join(root, f), "r") as config_file:
             for line in config_file.readlines():
                 line = line.strip()
                 if line.startswith("script="):
@@ -432,12 +429,12 @@ class Project:
         for script_resource in self.resources.values():
             if script_resource.type != "script":
                 continue
-
-            if not os.path.exists(script_resource.abspath()):
+            abs_path = os.path.join(self._project_path, script_resource.path)
+            if not os.path.exists(abs_path):
                 logger.warning("Nonexistent script:", script_resource.name)
                 continue
 
-            with open(script_resource.abspath(), "r") as script_file:
+            with open(abs_path, "r") as script_file:
                 parent_classname = ""
                 while line := script_file.readline():
                     line = line.strip()
@@ -470,7 +467,7 @@ class Project:
         # project.godot
         # Also go over Autoloads and register their node names as class names
         assert self.project_resource
-        with open(self.project_resource.abspath()) as project_file:
+        with open(self._project_path + "project.godot") as project_file:
             autoloads_section = False
             plugins_section = False
             while line := project_file.readline():
@@ -505,7 +502,7 @@ class Project:
                 if plugins_section:
                     if line.startswith("enabled="):
                         cfg_paths = [
-                            item.replace("res://", PROJECT_PATH)
+                            item.replace("res://", self._project_path)
                             for item in line.split('"')
                             if item.startswith("res://")
                         ]
@@ -662,26 +659,26 @@ if __name__ == "__main__":
         logger.info("Loading project.json")
         with open(settings.load, "r") as project_file:
             data = json.load(project_file)
-            project_temp = Project.from_dict(data)
+            project = Project.from_dict(data)
     else:
-        project_temp = Project(settings.project)
+        project = Project(settings.project)
         startTime = datetime.now()
-        project_temp.collect_resources()
-        project_temp.extract_classnames()
-        project_temp.process_project_file()
+        project.collect_resources()
+        project.extract_classnames()
+        project.process_project_file()
 
     if settings.dump:
-        project_temp.save(settings.dump)
+        project.save(settings.dump)
 
     # Find unreferenced resources
 
-    assert project_temp.project_resource
-    to_explore: List[str] = [project_temp.project_resource.uid]
+    assert project.project_resource
+    to_explore: List[str] = [project.project_resource.uid]
     explored: Set[str] = set()
 
     while len(to_explore) > 0:
         uid = to_explore.pop()
-        if resource_to_explore := project_temp.resources.get(uid):
+        if resource_to_explore := project.resources.get(uid):
             for ref_uid in resource_to_explore.referenced_uids:
                 if ref_uid in explored:
                     continue
@@ -694,12 +691,12 @@ if __name__ == "__main__":
 
     unused_resources = [
         res
-        for uid, res in project_temp.resources.items()
-        if res.uid not in explored and os.path.exists(res.abspath())
+        for uid, res in project.resources.items()
+        if res.uid not in explored and os.path.exists(os.path.join(project._project_path, res.path))
     ]
     logger.info("Unused resources:", len(unused_resources))
     potential_savings: int = sum(
-        [os.path.getsize(res.abspath()) for res in unused_resources]
+        [os.path.getsize(os.path.join(project._project_path, res.path)) for res in unused_resources]
     )
     logger.info("Potential savings:", format_memory(potential_savings))
 
