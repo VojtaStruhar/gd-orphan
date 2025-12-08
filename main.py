@@ -69,26 +69,6 @@ def extract_uid_regex(line: str) -> str:
     return ""
 
 
-def format_mermaid_resource(res: Resource) -> str:
-    brackets = ("[", "]")
-    name = res.name
-    if res.type == "script":
-        brackets = ("(", ")")
-        if res.uid in project.classnames.values():
-            name = next(
-                (key for key, val in project.classnames.items() if val == res.uid)
-            )
-
-    elif res.type == "resource":
-        brackets = ("{{", "}}")
-    elif res.type == "scene":
-        brackets = ("[[", "]]")
-    elif res.type == "image":
-        brackets = ("([", "])")
-
-    return f"{res.uid}{brackets[0]}{name}{brackets[1]}"
-
-
 def format_memory(amount: int) -> str:
     if amount < 1_000:
         return f"{amount:.2f} B"
@@ -173,8 +153,12 @@ class Project:
         """ class_name --> UID mapping"""
         self.resources: Dict[str, Resource] = {}
         """ UID --> Scene/Script/Texture/... mapping"""
+        # HACK
+        global PROJECT_PATH
+        PROJECT_PATH = project_path
 
     def save(self, filepath: str) -> None:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w") as f:
             json.dump(self.to_dict(), f, indent=4)
 
@@ -200,7 +184,9 @@ class Project:
         return p
 
     def process_file(self, root: str, f: str) -> Optional[Resource]:
-        assert root.startswith(PROJECT_PATH)
+        assert root.startswith(PROJECT_PATH), (
+            f"Invalid root path? {root}, {PROJECT_PATH}"
+        )
         file_ext = f.split(".")[-1]
         if file_ext == "uid":
             stripped = f.removesuffix(".uid")
@@ -426,71 +412,24 @@ class Project:
             parent = os.path.dirname(parent)
         return "res://" + os.path.join(parent, path)
 
-
-def draw_flow_chart(mermaid_path: str) -> None:
-    logger.info("Generating flow chart...")
-    flowchart = """---
-config:
-  flowchart:
-    curve: bumpX
----
-graph LR
-"""
-    flowchart_lines: List[str] = []
-    for res_uid in sorted(explored):
-        res = project.resources.get(res_uid)
-        if res is None:
-            logger.warning(f"Cannot draw nonexistent resource: {res_uid}")
-            continue
-
-        for ref in res.referenced_uids:
-            if ref in explored:
-                if ref_resource := project.resources.get(ref):
-                    flowchart_lines.append(
-                        f"    {format_mermaid_resource(res)} --> {format_mermaid_resource(ref_resource)}\n"
-                    )
-                else:
-                    logger.warning(
-                        "Cannot include nonexistent resource in flow chart:", ref
-                    )
-            # logger.debug("Don't include unexplored references in flow chart:", ref)
-
-    flowchart += "".join(sorted(flowchart_lines))
-    with open(mermaid_path, "w") as flowchart_file:
-        flowchart_file.write(flowchart)
-
-
-if __name__ == "__main__":
-    settings = parser.parse_args()
-    PROJECT_PATH = settings.project
-
-    if not PROJECT_PATH.endswith("/"):
-        PROJECT_PATH += "/"
-
-    if settings.load:
-        assert os.path.exists(settings.load)
-
-        logger.info("Loading project.json")
-        with open(settings.load, "r") as project_file:
-            data = json.load(project_file)
-            project = Project.from_dict(data)
-    else:
-        project = Project(settings.project)
-        startTime = datetime.now()
-        for root, dirs, files in os.walk(PROJECT_PATH):
-            relative = root.replace(PROJECT_PATH, "")
+    def collect_resources(self) -> None:
+        for root, dirs, files in os.walk(self._project_path):
+            relative = root.replace(self._project_path, "")
             if any(ignored in relative for ignored in IGNORED_FOLDERS):
                 dirs[:] = []
                 continue
+
             for f in files:
                 if f in IGNORED_FILES:
                     continue
-                project.process_file(root, f)
 
-        logger.info("Collected", len(project.resources), "project resources")
+                self.process_file(root, f)
 
+        logger.info("Collected", len(self.resources), "project resources")
+
+    def extract_classnames(self) -> None:
         # Go over scripts, extract class names
-        for script_resource in project.resources.values():
+        for script_resource in self.resources.values():
             if script_resource.type != "script":
                 continue
 
@@ -509,34 +448,35 @@ if __name__ == "__main__":
                     try:
                         if words[0] == "class_name":
                             cn = words[words.index("class_name") + 1]
-                            assert cn not in project.classnames
-                            project.classnames[cn] = script_resource.uid
+                            assert cn not in self.classnames
+                            self.classnames[cn] = script_resource.uid
                             parent_classname = cn
                         elif words[0] == "class":
                             cn = words[words.index("class") + 1]
                             if parent_classname:
                                 cn = parent_classname + "." + cn
 
-                            if cn not in project.classnames:
-                                project.classnames[cn] = script_resource.uid
+                            if cn not in self.classnames:
+                                self.classnames[cn] = script_resource.uid
                             else:
                                 logger.debug(
-                                    f"Inner class {cn} of {script_resource.name} already defined in {project.resources[project.classnames[cn]].name}"
+                                    f"Inner class {cn} of {script_resource.name} already defined in {self.resources[self.classnames[cn]].name}"
                                 )
 
                     except IndexError:
                         pass
 
+    def process_project_file(self) -> None:
         # project.godot
         # Also go over Autoloads and register their node names as class names
-        assert project.project_resource
-        with open(project.project_resource.abspath()) as project_file:
+        assert self.project_resource
+        with open(self.project_resource.abspath()) as project_file:
             autoloads_section = False
             plugins_section = False
             while line := project_file.readline():
                 if line.startswith("run/main_scene"):
-                    project.main_scene_uid = extract_protocoled_string("uid://", line)
-                    project.project_resource.referenced_uids.add(project.main_scene_uid)
+                    self.main_scene_uid = extract_protocoled_string("uid://", line)
+                    self.project_resource.referenced_uids.add(self.main_scene_uid)
 
                 if line.startswith("["):
                     autoloads_section = line.strip() == "[autoload]"
@@ -554,13 +494,13 @@ if __name__ == "__main__":
                         autoload_uid = next(
                             (
                                 r.uid
-                                for r in project.resources.values()
+                                for r in self.resources.values()
                                 if r.path == file_path
                             )
                         )
-                        assert project.classnames.get(cn) is None
-                        project.classnames[cn] = autoload_uid
-                        project.project_resource.referenced_uids.add(autoload_uid)
+                        assert self.classnames.get(cn) is None
+                        self.classnames[cn] = autoload_uid
+                        self.project_resource.referenced_uids.add(autoload_uid)
 
                 if plugins_section:
                     if line.startswith("enabled="):
@@ -570,25 +510,25 @@ if __name__ == "__main__":
                             if item.startswith("res://")
                         ]
                         for config_path in cfg_paths:
-                            config_res = project.process_config_file(
+                            config_res = self.process_config_file(
                                 os.path.dirname(config_path),
                                 os.path.basename(config_path),
                             )
 
-                            project.project_resource.referenced_uids.add(config_res.uid)
+                            self.project_resource.referenced_uids.add(config_res.uid)
 
-        logger.info(f"Collected {len(project.classnames)} GDScript class_names")
+        logger.info(f"Collected {len(self.classnames)} GDScript class_names")
 
         # Go over scripts' contents once more and detect class name usage (regex?)
 
+    def detect_class_references_and_shader_includes(self) -> None:
         MISSING_FILES: Set[str] = set()
-
-        for script_resource in project.resources.values():
+        for script_resource in self.resources.values():
             if not os.path.exists(script_resource.abspath()):
                 logger.warning("Nonexistent resource:", script_resource.name)
                 continue
             if script_resource.type == "script":
-                for cn, classname_uid in project.classnames.items():
+                for cn, classname_uid in self.classnames.items():
                     if script_resource.uid == classname_uid:
                         continue  # Don't detect on yourself
 
@@ -611,7 +551,7 @@ if __name__ == "__main__":
                                 )
                             elif '"res://' in line:
                                 res_path = extract_protocoled_string("res://", line)
-                                res = project.lookup_resource_by_path(res_path)
+                                res = self.lookup_resource_by_path(res_path)
                                 if res:
                                     script_resource.referenced_uids.add(res.uid)
                                 else:
@@ -623,10 +563,10 @@ if __name__ == "__main__":
                                 loaded_thing = line[
                                     start_index : (start_index + end_index)
                                 ]
-                                loaded_thing = project.get_res_path_from_relative(
+                                loaded_thing = self.get_res_path_from_relative(
                                     loaded_thing, script_resource
                                 )
-                                res = project.lookup_resource_by_path(loaded_thing)
+                                res = self.lookup_resource_by_path(loaded_thing)
                                 if res:
                                     script_resource.referenced_uids.add(res.uid)
                                 else:
@@ -640,16 +580,16 @@ if __name__ == "__main__":
                         if line.startswith("#include "):
                             between_quotes = line.split('"')[1]
                             if between_quotes.startswith("res://"):
-                                include_res = project.lookup_resource_by_path(
+                                include_res = self.lookup_resource_by_path(
                                     between_quotes.removeprefix("res://")
                                 )
                             elif between_quotes.startswith("uid://"):
-                                include_res = project.resources.get(between_quotes)
+                                include_res = self.resources.get(between_quotes)
                             else:  # relative path lookup
-                                included_path = project.get_res_path_from_relative(
+                                included_path = self.get_res_path_from_relative(
                                     between_quotes, script_resource
                                 )
-                                include_res = project.lookup_resource_by_path(
+                                include_res = self.lookup_resource_by_path(
                                     included_path
                                 )
                             assert include_res
@@ -660,15 +600,88 @@ if __name__ == "__main__":
             logger.warning("Could not find referenced resource:", mf)
 
         logger.info("Finished in", datetime.now() - startTime)
-        project.save("project.json")
 
-    assert project.project_resource
-    to_explore: List[str] = [project.project_resource.uid]
+    def format_mermaid_resource(self, res: Resource) -> str:
+        brackets = ("[", "]")
+        name = res.name
+        if res.type == "script":
+            brackets = ("(", ")")
+            if res.uid in self.classnames.values():
+                name = next(
+                    (key for key, val in self.classnames.items() if val == res.uid)
+                )
+
+        elif res.type == "resource":
+            brackets = ("{{", "}}")
+        elif res.type == "scene":
+            brackets = ("[[", "]]")
+        elif res.type == "image":
+            brackets = ("([", "])")
+
+        return f"{res.uid}{brackets[0]}{name}{brackets[1]}"
+
+    def draw_flow_chart(self, mermaid_path: str) -> None:
+        logger.info("Generating flow chart...")
+        flowchart = """---
+config:
+flowchart:
+    curve: bumpX
+---
+graph LR
+"""
+        flowchart_lines: List[str] = []
+        for res_uid in sorted(explored):
+            res = self.resources.get(res_uid)
+            if res is None:
+                logger.warning(f"Cannot draw nonexistent resource: {res_uid}")
+                continue
+
+            for ref in res.referenced_uids:
+                if ref in explored:
+                    if ref_resource := self.resources.get(ref):
+                        flowchart_lines.append(
+                            f"    {self.format_mermaid_resource(res)} --> {self.format_mermaid_resource(ref_resource)}\n"
+                        )
+                    else:
+                        logger.warning(
+                            "Cannot include nonexistent resource in flow chart:", ref
+                        )
+                # logger.debug("Don't include unexplored references in flow chart:", ref)
+
+        flowchart += "".join(sorted(flowchart_lines))
+        with open(mermaid_path, "w") as flowchart_file:
+            flowchart_file.write(flowchart)
+
+
+if __name__ == "__main__":
+    settings = parser.parse_args()
+
+    if settings.load:
+        assert os.path.exists(settings.load)
+
+        logger.info("Loading project.json")
+        with open(settings.load, "r") as project_file:
+            data = json.load(project_file)
+            project_temp = Project.from_dict(data)
+    else:
+        project_temp = Project(settings.project)
+        startTime = datetime.now()
+        project_temp.collect_resources()
+        project_temp.extract_classnames()
+        project_temp.process_project_file()
+
+    if settings.dump:
+        project_temp.save(settings.dump)
+
+    # Find unreferenced resources
+
+    assert project_temp.project_resource
+    to_explore: List[str] = [project_temp.project_resource.uid]
     explored: Set[str] = set()
 
     while len(to_explore) > 0:
         uid = to_explore.pop()
-        if resource_to_explore := project.resources.get(uid):
+        if resource_to_explore := project_temp.resources.get(uid):
             for ref_uid in resource_to_explore.referenced_uids:
                 if ref_uid in explored:
                     continue
@@ -681,7 +694,7 @@ if __name__ == "__main__":
 
     unused_resources = [
         res
-        for uid, res in project.resources.items()
+        for uid, res in project_temp.resources.items()
         if res.uid not in explored and os.path.exists(res.abspath())
     ]
     logger.info("Unused resources:", len(unused_resources))
@@ -692,8 +705,3 @@ if __name__ == "__main__":
 
     with open("safe_to_delete.txt", "w") as safe_to_delete:
         safe_to_delete.write("\n".join(sorted([res.path for res in unused_resources])))
-
-    if settings.dump:
-        os.makedirs(os.path.dirname(settings.dump), exist_ok=True)
-        with open(settings.dump, "w") as project_file:
-            json.dump(project.to_dict(), project_file, indent=4)
