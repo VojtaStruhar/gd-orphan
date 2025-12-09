@@ -235,7 +235,7 @@ class Project:
                 self.project_resource = self.register_opaque_resource(root, f)
                 return self.project_resource
 
-            case "bin" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll":
+            case "bin" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll" | "res":
                 return self.register_opaque_resource(root, f)
 
             case "lmbake":
