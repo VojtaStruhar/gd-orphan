@@ -200,10 +200,32 @@ class Project:
             case "gdextension":
                 return self.process_gdextension(root, f)
 
-            case "png" | "jpg" | "svg" | "otf" | "ttf" | "glb" | "webp" | "fbx" | "blend" | "tga" | "gltf" | "exr" | "wav":
+            case "png" | "jpg" | "svg" | "otf" | "ttf" | "glb" | "webp" | "fbx" | "blend" | "tga" | "exr" | "wav":
 
                 if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
                     return self.register_imported_file(root, f + ".import")
+                logger.warning(f"No `.import` file for {root}/{f}")
+
+            case "gltf":
+                if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
+                    gltf_resource = self.register_imported_file(root, f + ".import")
+                    with open(os.path.join(self.project_path, root, f), "r") as gltf_file:
+                        gltf_json = json.loads(gltf_file.read())
+                        for image_data in gltf_json["images"]:
+                            uri = image_data["uri"] # Most probably just an image name lying next to the gltf
+                            uri = uri.replace("%20", " ")
+                            assert not uri.startswith("..")
+                            assert not "/" in uri
+                            image_resource = self.process_file(root, uri)
+                            if image_resource:
+                                logger.info(f"Image {uri} in mesh {f}")
+                                gltf_resource.referenced_uids.add(image_resource.uid)
+                            else:
+                                logger.warning(f"Nonexistent image {uri} in {f}")
+
+                    self.resources[gltf_resource.uid] = gltf_resource
+                    return gltf_resource
+
                 logger.warning(f"No `.import` file for {root}/{f}")
 
             case "tres" | "tscn":
@@ -213,7 +235,11 @@ class Project:
                 self.project_resource = self.register_opaque_resource(root, f)
                 return self.project_resource
 
-            case "bin" | "res" | "lmbake" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll":
+            case "bin" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll":
+                return self.register_opaque_resource(root, f)
+
+            case "lmbake":
+                logger.warning(f"File {f} is a total blackbox. I can't know if it references anything.")
                 return self.register_opaque_resource(root, f)
 
             case "cfg":
