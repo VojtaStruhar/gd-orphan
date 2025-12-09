@@ -1,9 +1,7 @@
 import argparse
 import json
-import logging
 import os
 import re
-import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
@@ -25,6 +23,9 @@ IGNORED_FILES = [
     ".gitattributes",
     ".editorconfig",
     "LICENSE",
+]
+ALWAYS_INCLUDE = [
+    "export_presets.cfg"
 ]
 
 # ----------------------------------------
@@ -682,9 +683,9 @@ if __name__ == "__main__":
     ]
 
     if settings.always_include:
-        always_include = [part.strip() for part in settings.always_include.split(",") if part.strip()]
-        print(always_include)
-        unused_resources = [res for res in unused_resources if not any(map(res.path.startswith, always_include))]
+        ALWAYS_INCLUDE += [part.strip() for part in settings.always_include.split(",") if part.strip()]
+
+    unused_resources = [res for res in unused_resources if not any(map(res.path.startswith, ALWAYS_INCLUDE))]
 
     logger.info("Unused resources:", len(unused_resources))
     potential_savings: int = sum(
