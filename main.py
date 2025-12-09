@@ -114,7 +114,7 @@ class Resource:
                 self.type = "GDExtension"
             case "lmbake":
                 self.type = "baked lightmap"
-            case "bin" | "dylib" | "wasm" | "a":
+            case "bin" | "dylib" | "wasm" | "a" | "dll":
                 self.type = "binary?"
             case "cfg" | "json":
                 self.type = "config"
@@ -187,70 +187,50 @@ class Project:
             f"Invalid root path? {root}, {self.project_path}"
         )
         file_ext = f.split(".")[-1]
-        if file_ext == "uid":
-            stripped = f.removesuffix(".uid")
-            if parent := self.process_file(root, stripped):
-                return parent
+        match file_ext:
+            case "uid":
+                stripped = f.removesuffix(".uid")
+                if parent := self.process_file(root, stripped):
+                    return parent
 
-            logger.error(f"Unhandled `.uid` file: {f}")
-        elif file_ext in ("gd", "gdshader", "gdshaderinc"):
-            return self.register_script(root, f)
-        elif f.endswith(".gdextension"):
-            return self.process_gdextension(root, f)
+                logger.error(f"Unhandled `.uid` file: {f}")
+            case "gd" | "gdshader" | "gdshaderinc":
+                return self.register_script(root, f)
+            case "gdextension":
+                return self.process_gdextension(root, f)
 
-        elif file_ext in (
-            "png",
-            "jpg",
-            "svg",
-            "otf",
-            "ttf",
-            "glb",
-            "webp",
-            "fbx",
-            "blend",
-            "tga",
-            "gltf",
-            "exr",
-            "wav",
-        ):
-            if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
-                return self.register_imported_file(root, f + ".import")
-            logger.warning(f"No `.import` file for {root}/{f}")
+            case "png" | "jpg" | "svg" | "otf" | "ttf" | "glb" | "webp" | "fbx" | "blend" | "tga" | "gltf" | "exr" | "wav":
 
-        elif f.endswith(".tres") or f.endswith(".tscn"):
-            return self.process_scene_or_resource(root, f)
-        elif f == "project.godot":
-            self.project_resource = self.register_opaque_resource(root, f)
-            return self.project_resource
+                if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
+                    return self.register_imported_file(root, f + ".import")
+                logger.warning(f"No `.import` file for {root}/{f}")
 
-        elif file_ext in ("bin", "res", "lmbake", "wasm", "a", "dylib", "dds", "json"):
-            return self.register_opaque_resource(root, f)
+            case "tres" | "tscn":
+                return self.process_scene_or_resource(root, f)
 
-        elif file_ext == "cfg":
-            return self.process_config_file(root, f)
+            case "godot": # project.godot
+                self.project_resource = self.register_opaque_resource(root, f)
+                return self.project_resource
 
-        elif f.endswith(".import"):
-            pass  # Handled per specific resource extension
+            case "bin" | "res" | "lmbake" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll":
+                return self.register_opaque_resource(root, f)
 
-        elif file_ext == "cs":
-            pass  # We don't use C#
+            case "cfg":
+                return self.process_config_file(root, f)
 
-        elif file_ext in (
-            "md",
-            "txt",
-            "log",
-            "kra",
-            "blend1",
-            "unwrap_cache",
-            "tmp",
-            "depren",
-        ):
-            # depren - https://github.com/godotengine/godot/issues/96687
-            pass  # Don't care
+            case "import":
+                pass  # Handled per specific resource extension
 
-        else:
-            logger.error("UNKNOWN FILE:", f)
-            pass
+            case "cs":
+                pass  # We don't use C#
+
+            case "md" | "txt" | "log" | "kra" | "blend1" | "unwrap_cache" | "tmp" | "depren":
+                # depren - https://github.com/godotengine/godot/issues/96687
+                pass  # Don't care
+
+            case _:
+                logger.error("UNKNOWN FILE:", f)
+                pass
 
         return None
 
@@ -271,15 +251,23 @@ class Project:
         if not os.path.exists(source_path):
             logger.warning("Strange - import file without original file?", source_path)
             return None
-
+        main_res: Optional[Resource] = None
         with open(os.path.join(root, f), "r") as import_file:
             while line := import_file.readline():
                 line = line.strip()
-                if line.startswith('uid="'):
+                if line.startswith('uid="') and main_res is None:
                     imported_uid = line[len('uid="') : -1]
-                    self.resources[imported_uid] = Resource(imported_uid, source_path.removeprefix(self.project_path))
-                    return self.resources[imported_uid]
-        return None
+                    main_res = Resource(imported_uid, source_path.removeprefix(self.project_path))
+                    self.resources[imported_uid] = main_res
+                    continue
+
+                if "uid://" in line:
+                    assert main_res
+                    uid = extract_uid_regex(line)
+                    assert uid
+                    main_res.referenced_uids.add(uid)
+
+        return main_res
 
     def register_opaque_resource(self, root: str, f: str) -> Resource:
         """
@@ -445,12 +433,12 @@ class Project:
 
                     words = line.split()
                     try:
-                        if words[0] == "class_name":
+                        if "class_name" in words[:2]:
                             cn = words[words.index("class_name") + 1]
                             assert cn not in self.classnames
                             self.classnames[cn] = script_resource.uid
                             parent_classname = cn
-                        elif words[0] == "class":
+                        elif "class" in words[:2]:
                             cn = words[words.index("class") + 1]
                             if parent_classname:
                                 cn = parent_classname + "." + cn
@@ -459,7 +447,7 @@ class Project:
                                 self.classnames[cn] = script_resource.uid
                             else:
                                 logger.debug(
-                                    f"Inner class {cn} of {script_resource.name} already defined in {self.resources[self.classnames[cn]].name}"
+                                    f"Inner class '{cn}' of {script_resource.name} already defined in {self.resources[self.classnames[cn]].name}: <<{line}>>"
                                 )
 
                     except IndexError:
@@ -489,18 +477,12 @@ class Project:
                         file_path = (
                             file_path.replace("*", "")
                             .replace('"', "")
-                            .removeprefix("res://")
                         )
-                        autoload_uid = next(
-                            (
-                                r.uid
-                                for r in self.resources.values()
-                                if r.path == file_path
-                            )
-                        )
+                        autoload_res = project.lookup_resource_by_path(file_path)
+                        assert autoload_res
                         assert self.classnames.get(cn) is None
-                        self.classnames[cn] = autoload_uid
-                        self.project_resource.referenced_uids.add(autoload_uid)
+                        self.classnames[cn] = autoload_res.uid
+                        self.project_resource.referenced_uids.add(autoload_res.uid)
 
                 if plugins_section:
                     if line.startswith("enabled="):
