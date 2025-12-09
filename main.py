@@ -4,6 +4,7 @@ import os
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
+from gltflib import GLTF, FileResource, GLBResource
 
 from logging_utils import logger
 
@@ -200,28 +201,30 @@ class Project:
             case "gdextension":
                 return self.process_gdextension(root, f)
 
-            case "png" | "jpg" | "svg" | "otf" | "ttf" | "glb" | "webp" | "fbx" | "blend" | "tga" | "exr" | "wav":
+            case "png" | "jpg" | "svg" | "otf" | "ttf" | "webp" | "fbx" | "blend" | "tga" | "exr" | "wav":
 
                 if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
                     return self.register_imported_file(root, f + ".import")
                 logger.warning(f"No `.import` file for {root}/{f}")
 
-            case "gltf":
+            case "gltf" | "glb":
                 if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
                     gltf_resource = self.register_imported_file(root, f + ".import")
-                    with open(os.path.join(self.project_path, root, f), "r") as gltf_file:
-                        gltf_json = json.loads(gltf_file.read())
-                        for image_data in gltf_json["images"]:
-                            uri = image_data["uri"] # Most probably just an image name lying next to the gltf
+                    gltf = GLTF.load(os.path.join(self.project_path, root, f))
+                    for subres in gltf.resources:
+                        if isinstance(subres, FileResource):
+                            uri = subres.uri
                             uri = uri.replace("%20", " ")
                             assert not uri.startswith("..")
                             assert not "/" in uri
-                            image_resource = self.process_file(root, uri)
-                            if image_resource:
-                                logger.info(f"Image {uri} in mesh {f}")
-                                gltf_resource.referenced_uids.add(image_resource.uid)
-                            else:
+                            if not os.path.exists(os.path.join(root, uri)):
                                 logger.warning(f"Nonexistent image {uri} in {f}")
+                            else:
+                                referenced_resource = self.process_file(root, uri)
+                                assert referenced_resource is not None
+                                logger.info(f"File resource {uri} in mesh {f}")
+                                gltf_resource.referenced_uids.add(referenced_resource.uid)
+
 
                     self.resources[gltf_resource.uid] = gltf_resource
                     return gltf_resource
@@ -236,6 +239,7 @@ class Project:
                 return self.project_resource
 
             case "bin" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll" | "res":
+                # TODO: Parse .res files
                 return self.register_opaque_resource(root, f)
 
             case "lmbake":
