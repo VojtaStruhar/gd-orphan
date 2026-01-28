@@ -1,6 +1,10 @@
+# GD Orphans
 
+> Script for detecting unused resources in Godot projects.
 
-## TODO
+## Install and run
 
-- [x] Shader includes
-- [x] Parse Config files
+- Get [`uv`](https://docs.astral.sh/uv/) Python manager
+- `uv sync`
+- `uv run main.py --help`
+

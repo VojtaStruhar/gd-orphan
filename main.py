@@ -16,6 +16,7 @@ IGNORED_FOLDERS = [
     ".godot",
     "android",
     "ios_export",
+    "ios/plugins"
 ]
 IGNORED_FILES = [
     ".DS_Store",
@@ -26,7 +27,9 @@ IGNORED_FILES = [
     "LICENSE",
 ]
 ALWAYS_INCLUDE = [
-    "export_presets.cfg"
+    "export_presets.cfg",
+    "firebase_configs",
+    "translations"
 ]
 
 # ----------------------------------------
@@ -216,13 +219,13 @@ class Project:
                             uri = subres.uri
                             uri = uri.replace("%20", " ")
                             assert not uri.startswith("..")
-                            assert not "/" in uri
+                            #assert not "/" in uri, f"URI contains a slash: {uri}"
                             if not os.path.exists(os.path.join(root, uri)):
                                 logger.warning(f"Nonexistent image {uri} in {f}")
                             else:
                                 referenced_resource = self.process_file(root, uri)
                                 assert referenced_resource is not None
-                                logger.info(f"File resource {uri} in mesh {f}")
+                                #logger.debug(f"File resource {uri} in mesh {f}")
                                 gltf_resource.referenced_uids.add(referenced_resource.uid)
 
 
@@ -258,7 +261,6 @@ class Project:
             case "md" | "txt" | "log" | "kra" | "blend1" | "unwrap_cache" | "tmp" | "depren":
                 # depren - https://github.com/godotengine/godot/issues/96687
                 pass  # Don't care
-
             case _:
                 logger.error("UNKNOWN FILE:", f)
                 pass
@@ -729,3 +731,4 @@ if __name__ == "__main__":
 
     with open("safe_to_delete.csv", "w") as safe_to_delete:
         safe_to_delete.write(", ".join(unused_paths))
+

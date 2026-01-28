@@ -25,8 +25,8 @@ def formatter_message(message, use_color=True):
 
 COLORS = {
     'WARNING': YELLOW,
-    'INFO': WHITE,
-    'DEBUG': BLUE,
+    'INFO': BLUE,
+    'DEBUG': WHITE,
     'CRITICAL': YELLOW,
     'ERROR': RED
 }
@@ -66,19 +66,19 @@ class ColoredLogger(logging.Logger):
         return
     
     def debug(self, *args):
-        super().debug(" ".join(map(str, args)))
+        super().debug(" ".join(map(str, args)), stacklevel=2)
 
     def info(self, *args) -> None:
-        super().info(" ".join(map(str, args)))
+        super().info(" ".join(map(str, args)), stacklevel=2)
 
     def warning(self, *args) -> None:
-        super().warning(" ".join(map(str, args)))
+        super().warning(" ".join(map(str, args)), stacklevel=2)
 
     def error(self, *args) -> None:
-        super().error(" ".join(map(str, args)))
+        super().error(" ".join(map(str, args)), stacklevel=2)
 
     def critical(self, *args) -> None:
-        super().critical(" ".join(map(str, args)))
+        super().critical(" ".join(map(str, args)), stacklevel=2)
 
 
 
