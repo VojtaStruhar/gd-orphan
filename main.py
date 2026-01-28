@@ -732,3 +732,8 @@ if __name__ == "__main__":
     with open("safe_to_delete.csv", "w") as safe_to_delete:
         safe_to_delete.write(", ".join(unused_paths))
 
+    translation_sources = [project.resources.get(uid) for uid in explored]
+    translation_sources = [res for res in translation_sources if res.type in ("scene", "script")]
+    translation_sources = sorted(["res://" + res.path for res in translation_sources if not res.path.startswith("addons")])
+    with open("translation_sources.txt", "w") as translation_sources_file:
+        translation_sources_file.write("PackedStringArray(\"" + "\", \"".join(translation_sources) + "\")")
