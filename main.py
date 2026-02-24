@@ -29,7 +29,6 @@ IGNORED_FILES = [
 ALWAYS_INCLUDE = [
     "export_presets.cfg",
     "firebase_configs",
-    "translations"
 ]
 
 # ----------------------------------------
@@ -64,6 +63,9 @@ def extract_protocoled_string(prefix: str, text: str) -> str:
     end_index = text[start_index:].index('"')
     uid = text[start_index : (start_index + end_index)]
     return uid
+
+def extract_quoted_strings(line: str) -> List[str]:
+    return line.split('"')[1::2]
 
 
 regex_uid = re.compile("(uid://[a-z0-9]+)")
@@ -119,7 +121,9 @@ class Resource:
                 self.type = "GDExtension"
             case "lmbake":
                 self.type = "baked lightmap"
-            case "bin" | "dylib" | "wasm" | "a" | "dll":
+            case "translation" | "pot" | "po" | "csv":
+                self.type = "translations"
+            case "bin" | "dylib" | "wasm" | "a" | "dll" | "so":
                 self.type = "binary?"
             case "cfg" | "json":
                 self.type = "config"
@@ -204,7 +208,7 @@ class Project:
             case "gdextension":
                 return self.process_gdextension(root, f)
 
-            case "png" | "jpg" | "svg" | "otf" | "ttf" | "webp" | "fbx" | "blend" | "tga" | "exr" | "wav":
+            case "png" | "jpg" | "svg" | "otf" | "ttf" | "webp" | "fbx" | "blend" | "tga" | "exr" | "wav" | "csv":
 
                 if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
                     return self.register_imported_file(root, f + ".import")
@@ -235,13 +239,13 @@ class Project:
                 logger.warning(f"No `.import` file for {root}/{f}")
 
             case "tres" | "tscn":
-                return self.process_scene_or_resource(root, f)
+                return self.process_text_scene_or_resource(root, f)
 
             case "godot": # project.godot
                 self.project_resource = self.register_opaque_resource(root, f)
                 return self.project_resource
 
-            case "bin" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll" | "res":
+            case "bin" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll" | "res" | "translation" | "pot" | "po" | "so":
                 # TODO: Parse .res files
                 return self.register_opaque_resource(root, f)
 
@@ -258,7 +262,10 @@ class Project:
             case "cs":
                 pass  # We don't use C#
 
-            case "md" | "txt" | "log" | "kra" | "blend1" | "unwrap_cache" | "tmp" | "depren":
+            case "gif":
+                pass  # Import process splits it into a spritesheet
+
+            case "md" | "txt" | "log" | "kra" | "blend1" | "unwrap_cache" | "tmp" | "depren" | "sh" | "plist" | "pem":
                 # depren - https://github.com/godotengine/godot/issues/96687
                 pass  # Don't care
             case _:
@@ -313,7 +320,7 @@ class Project:
             self.resources[gdext_res.uid] = gdext_res
         return gdext_res
 
-    def process_scene_or_resource(self, root: str, f: str) -> Optional[Resource]:
+    def process_text_scene_or_resource(self, root: str, f: str) -> Optional[Resource]:
         with open(os.path.join(root, f), "r") as res_file:
             # This should be defined on the very first row of the file
             scene_resource: Optional[Resource] = None
@@ -405,7 +412,7 @@ class Project:
         return cfg_res
 
     def lookup_resource_by_path(self, res_path: str) -> Optional[Resource]:
-        assert res_path.startswith("res://"), "supply bare project-relative path"
+        assert res_path.startswith("res://"), f"supply bare project-relative path: {res_path}"
 
         if opaque_resource := self.resources.get(res_path):
             return opaque_resource
@@ -494,6 +501,7 @@ class Project:
         with open(self.project_path + "project.godot") as project_file:
             autoloads_section = False
             plugins_section = False
+            internationalization_section = False
             while line := project_file.readline():
                 if line.startswith("run/main_scene"):
                     self.main_scene_uid = extract_protocoled_string("uid://", line)
@@ -502,6 +510,7 @@ class Project:
                 if line.startswith("["):
                     autoloads_section = line.strip() == "[autoload]"
                     plugins_section = line.strip() == "[editor_plugins]"
+                    internationalization_section = line.strip() == "[internationalization]"
                     continue
 
                 if autoloads_section:
@@ -511,7 +520,10 @@ class Project:
                             file_path.replace("*", "")
                             .replace('"', "")
                         )
-                        autoload_res = project.lookup_resource_by_path(file_path)
+                        if file_path.startswith("uid://"):
+                            autoload_res = project.resources.get(file_path)
+                        else:
+                            autoload_res = project.lookup_resource_by_path(file_path)
                         assert autoload_res
                         assert self.classnames.get(cn) is None
                         self.classnames[cn] = autoload_res.uid
@@ -531,6 +543,12 @@ class Project:
                             )
 
                             self.project_resource.referenced_uids.add(config_res.uid)
+
+                if internationalization_section:
+                    if line.startswith("locale/translations="):
+                        translation_files = extract_quoted_strings(line)
+                        for tr in translation_files:
+                            self.project_resource.referenced_uids.add(tr)
 
         logger.info(f"Processed project.godot file")
 
