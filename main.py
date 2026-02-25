@@ -111,7 +111,8 @@ class Resource:
                 self.type = "image"
             case "otf" | "ttf":
                 self.type = "font"
-            case "glb" | "gltf" | "fbx" | "blend":
+            case "glb" | "gltf" | "fbx" | "blend" | "bin":
+                # `.bin` is a `.gltf` buffer attachment with arbitrary data.
                 self.type = "3D model"
             case "wav":
                 self.type = "sound"
@@ -123,7 +124,7 @@ class Resource:
                 self.type = "baked lightmap"
             case "translation" | "pot" | "po" | "csv":
                 self.type = "translations"
-            case "bin" | "dylib" | "wasm" | "a" | "dll" | "so":
+            case "dylib" | "wasm" | "a" | "dll" | "so":
                 self.type = "binary?"
             case "cfg" | "json":
                 self.type = "config"
