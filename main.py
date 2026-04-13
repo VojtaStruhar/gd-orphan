@@ -462,7 +462,7 @@ class Project:
                 continue
             abs_path = os.path.join(self.project_path, script_resource.path)
             if not os.path.exists(abs_path):
-                logger.warning("Nonexistent script:", script_resource.name)
+                logger.warning("Nonexistent script:", script_resource.name, f"({abs_path})")
                 continue
 
             with open(abs_path, "r") as script_file:
@@ -476,7 +476,9 @@ class Project:
                     try:
                         if "class_name" in words[:2]:
                             cn = words[words.index("class_name") + 1]
-                            assert cn not in self.classnames
+                            assert cn not in self.classnames, (f"Duplicate class_name: {cn} in {script_resource.name}, (already defined in {self.resources[self.classnames[cn]].path}). "
+                                                               f"This might be caused by outdated UIDs in .tscn files. Try running 'Project > Tools > Upgrade Project Files' in Godot. "
+                                                               f"Or search for UIDs '{self.classnames[cn]}' and '{script_resource.uid}' in the project and resolve the conflict manually.")
                             self.classnames[cn] = script_resource.uid
                             parent_classname = cn
                         elif "class" in words[:2]:
@@ -560,7 +562,7 @@ class Project:
         for script_resource in self.resources.values():
             script_abspath = os.path.join(self.project_path, script_resource.path)
             if not os.path.exists(script_abspath):
-                logger.warning("Nonexistent resource:", script_resource.name)
+                logger.warning("Nonexistent resource:", script_resource.name, f"({script_abspath})")
                 continue
             if script_resource.type == "script":
                 for cn, classname_uid in self.classnames.items():
@@ -689,6 +691,7 @@ graph LR
 
 
 if __name__ == "__main__":
+    start = datetime.now()
     settings = parser.parse_args()
     if settings.load:
         assert os.path.exists(settings.load)
@@ -751,3 +754,4 @@ if __name__ == "__main__":
     with open("safe_to_delete.csv", "w") as safe_to_delete:
         safe_to_delete.write(", ".join(unused_paths))
 
+    logger.debug(f"Finished in {datetime.now() - start}")
