@@ -29,6 +29,7 @@ IGNORED_FILES = [
 ALWAYS_INCLUDE = [
     "export_presets.cfg",
     "firebase_configs",
+    "assets/gui/icons/ui-green-arrow.png"
 ]
 
 # ----------------------------------------
@@ -215,6 +216,27 @@ class Project:
                     return self.register_imported_file(root, f + ".import")
                 logger.warning(f"No `.import` file for {root}/{f}")
 
+            case "obj":
+                if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
+                    obj_resource = self.register_imported_file(root, f + ".import")
+                    for line in open(os.path.join(self.project_path, root, f), "r").readlines():
+                        if line.startswith("mtllib"):
+                            mtl_path = line.removeprefix("mtllib ").strip()
+                            if not mtl_path.startswith("/"):
+                                mtl_path = os.path.realpath(os.path.join(root, mtl_path))
+
+                            if not os.path.exists(mtl_path):
+                                logger.warning(f"MTL referenced from OBJ file not found: {mtl_path}, {f}")
+                                continue
+
+                            mtl_resource = self.register_opaque_resource(root, mtl_path)
+                            obj_resource.referenced_uids.add(mtl_resource.uid)
+                else:
+                    logger.warning(f"No `.import` file for {root}/{f}")
+                    return None
+
+
+
             case "gltf" | "glb":
                 if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
                     gltf_resource = self.register_imported_file(root, f + ".import")
@@ -223,7 +245,7 @@ class Project:
                         if isinstance(subres, FileResource):
                             uri = subres.uri
                             uri = uri.replace("%20", " ")
-                            assert not uri.startswith("..")
+                            assert not uri.startswith(".."), f"GLTF ({f}) references something in parent folder: {uri}"
                             #assert not "/" in uri, f"URI contains a slash: {uri}"
                             if not os.path.exists(os.path.join(root, uri)):
                                 logger.warning(f"Nonexistent image {uri} in {f}")
@@ -246,7 +268,7 @@ class Project:
                 self.project_resource = self.register_opaque_resource(root, f)
                 return self.project_resource
 
-            case "bin" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll" | "res" | "translation" | "pot" | "po" | "so":
+            case "bin" | "wasm" | "a" | "dylib" | "dds" | "json" | "dll" | "res" | "translation" | "pot" | "po" | "so" | "mtl":
                 # TODO: Parse .res files
                 return self.register_opaque_resource(root, f)
 
@@ -753,5 +775,9 @@ if __name__ == "__main__":
 
     with open("safe_to_delete.csv", "w") as safe_to_delete:
         safe_to_delete.write(", ".join(unused_paths))
+
+    # with open("safe_to_delete_sorted_from_biggest.txt", "w") as biggest_savings:
+    #     savings: List[Resource] = sorted(unused_resources, key=lambda res: os.path.getsize(os.path.join(project.project_path, res.path)), reverse=True)
+    #     biggest_savings.write("\n".join(f"{res.path} ({format_memory(os.path.getsize(os.path.join(project.project_path, res.path)))})" for res in savings))
 
     logger.debug(f"Finished in {datetime.now() - start}")

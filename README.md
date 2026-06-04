@@ -8,3 +8,7 @@
 - `uv sync`
 - `uv run main.py --help`
 
+## TODO
+
+- Recognize BBcode in scenes and when setting `.text` in scripts. It might contain
+  the `[img]` tag - thus referencing images.
