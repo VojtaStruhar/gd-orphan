@@ -29,7 +29,8 @@ IGNORED_FILES = [
 ALWAYS_INCLUDE = [
     "export_presets.cfg",
     "firebase_configs",
-    "assets/gui/icons/ui-green-arrow.png"
+    "assets/gui/icons/ui-green-arrow.png",
+    "assets/ui/universal_theme/universal_colors.tres",
 ]
 
 # ----------------------------------------
@@ -164,6 +165,8 @@ class Project:
         self.main_scene_uid: str = ""
         self.classnames: Dict[str, str] = {}
         """ class_name --> UID mapping"""
+        self.pending_paths_to_resolve: Dict[str, List[str]] = {}
+        """ maps UID --> list of path only references. Resolve them to UID references on individual resources!"""
         self.resources: Dict[str, Resource] = {}
         """ UID --> Scene/Script/Texture/... mapping"""
 
@@ -329,6 +332,17 @@ class Project:
                     uid = extract_uid_regex(line)
                     assert uid
                     main_res.referenced_uids.add(uid)
+
+                if "/fallback_path" in line:
+                    if "res://" not in line:
+                        continue
+                    if not main_res:
+                        logger.warning(f"Strange - failed to detect import file UID first?", source_path)
+                        continue
+                    res_path = extract_protocoled_string("res://", line)
+                    if main_res.uid not in self.pending_paths_to_resolve:
+                        self.pending_paths_to_resolve[main_res.uid] = []
+                    self.pending_paths_to_resolve[main_res.uid].append(res_path)
 
         return main_res
 
@@ -660,6 +674,41 @@ class Project:
 
         logger.info("Finished in", datetime.now() - startTime)
 
+    def resolve_pending_res_paths(self) -> None:
+        for uid, res_paths in self.pending_paths_to_resolve.items():
+            if res := project.resources.get(uid):
+                for rp in res_paths:
+                    respath_res = self.lookup_resource_by_path(rp)
+                    if respath_res:
+                        res.referenced_uids.add(respath_res.uid)
+                    else:
+                        logger.warning(f"Path-resource referenced by {res.uid} not found: {rp}")
+            else:
+                logger.error(f"Parent resource for pending res paths not found: {uid}")
+        self.pending_paths_to_resolve.clear()
+    def cross_reference_opaque_resources(self) -> None:
+        resolved_opaques: List[str] = []  # to remove
+        for opaque_res_path in filter(lambda key: not key.startswith("uid"), self.resources.keys()):
+            logger.debug(f"Looking for {opaque_res_path}")
+            opaque_path = opaque_res_path.removeprefix("res://")
+            try:
+
+                existing_resource = next(
+                    res for res in self.resources.values() if res.path == opaque_path and res.uid != opaque_res_path)
+                logger.info(f"Found opaque resource referenced elsewhere! {opaque_res_path} -> {existing_resource.uid}")
+                resolved_opaques.append(opaque_res_path)
+
+                for res in self.resources.values():
+                    if opaque_res_path in res.referenced_uids:
+                        res.referenced_uids.remove(opaque_res_path)
+                        res.referenced_uids.add(existing_resource.uid)
+
+            except StopIteration:
+                pass
+
+        for opaque_res_path in resolved_opaques:
+            del self.resources[opaque_res_path]
+
     def format_mermaid_resource(self, res: Resource) -> str:
         brackets = ("[", "]")
         name = res.name
@@ -729,6 +778,8 @@ if __name__ == "__main__":
         project.extract_classnames()
         project.process_project_file()
         project.detect_class_references_and_shader_includes()
+        project.resolve_pending_res_paths()
+        project.cross_reference_opaque_resources()
 
     if settings.dump:
         project.save(settings.dump)
