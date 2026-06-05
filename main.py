@@ -689,13 +689,11 @@ class Project:
     def cross_reference_opaque_resources(self) -> None:
         resolved_opaques: List[str] = []  # to remove
         for opaque_res_path in filter(lambda key: not key.startswith("uid"), self.resources.keys()):
-            logger.debug(f"Looking for {opaque_res_path}")
             opaque_path = opaque_res_path.removeprefix("res://")
             try:
 
                 existing_resource = next(
                     res for res in self.resources.values() if res.path == opaque_path and res.uid != opaque_res_path)
-                logger.info(f"Found opaque resource referenced elsewhere! {opaque_res_path} -> {existing_resource.uid}")
                 resolved_opaques.append(opaque_res_path)
 
                 for res in self.resources.values():
