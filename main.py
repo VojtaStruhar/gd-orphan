@@ -560,9 +560,9 @@ class Project:
                             .replace('"', "")
                         )
                         if file_path.startswith("uid://"):
-                            autoload_res = project.resources.get(file_path)
+                            autoload_res = self.resources.get(file_path)
                         else:
-                            autoload_res = project.lookup_resource_by_path(file_path)
+                            autoload_res = self.lookup_resource_by_path(file_path)
                         assert autoload_res
                         assert self.classnames.get(cn) is None
                         self.classnames[cn] = autoload_res.uid
@@ -676,7 +676,7 @@ class Project:
 
     def resolve_pending_res_paths(self) -> None:
         for uid, res_paths in self.pending_paths_to_resolve.items():
-            if res := project.resources.get(uid):
+            if res := self.resources.get(uid):
                 for rp in res_paths:
                     respath_res = self.lookup_resource_by_path(rp)
                     if respath_res:
