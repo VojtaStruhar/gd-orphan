@@ -12,3 +12,4 @@
 
 - Recognize BBcode in scenes and when setting `.text` in scripts. It might contain
   the `[img]` tag - thus referencing images.
+- Read `.mtl` files and link referenced textures to them

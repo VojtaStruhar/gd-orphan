@@ -113,9 +113,11 @@ class Resource:
                 self.type = "image"
             case "otf" | "ttf":
                 self.type = "font"
-            case "glb" | "gltf" | "fbx" | "blend" | "bin":
+            case "glb" | "gltf" | "fbx" | "blend" | "bin" | "obj":
                 # `.bin` is a `.gltf` buffer attachment with arbitrary data.
                 self.type = "3D model"
+            case "mtl": # attached to .obj file
+                self.type = "material"
             case "wav":
                 self.type = "sound"
             case "gdshader" | "gdshaderinc":
@@ -563,7 +565,7 @@ class Project:
                             autoload_res = self.resources.get(file_path)
                         else:
                             autoload_res = self.lookup_resource_by_path(file_path)
-                        assert autoload_res
+                        assert autoload_res, f"Autoload not found: {cn} ({file_path})"
                         assert self.classnames.get(cn) is None
                         self.classnames[cn] = autoload_res.uid
                         self.project_resource.referenced_uids.add(autoload_res.uid)
