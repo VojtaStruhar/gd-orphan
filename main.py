@@ -1,4 +1,5 @@
 import argparse
+import functools
 import json
 import os
 import re
@@ -50,6 +51,12 @@ parser.add_argument(
 )
 parser.add_argument("--always-include", type=str, help="Comma-separated list of files or directories to exclude from the 'safe to remove' list. They should stay in the project no matter what.")
 
+def stage(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        logger.info(f"STAGE: {func.__name__}")
+        return func(*args, **kwargs)
+    return wrapper
 
 def is_valid_uid(uid: str) -> bool:
     parts = uid.split("://")
@@ -478,6 +485,7 @@ class Project:
             parent = os.path.dirname(parent)
         return "res://" + os.path.join(parent, path)
 
+    @stage
     def collect_resources(self) -> None:
         for root, dirs, files in os.walk(self.project_path):
             relative = root.replace(self.project_path, "")
@@ -493,6 +501,7 @@ class Project:
 
         logger.info("Collected", len(self.resources), "project resources")
 
+    @stage
     def extract_classnames(self) -> None:
         # Go over scripts, extract class names
         for script_resource in self.resources.values():
@@ -535,6 +544,7 @@ class Project:
                         pass
         logger.debug("Collected", len(self.classnames), "class_names")
 
+    @stage
     def process_project_file(self) -> None:
         # project.godot
         # Also go over Autoloads and register their node names as class names
@@ -593,8 +603,9 @@ class Project:
 
         logger.info(f"Processed project.godot file")
 
-        # Go over scripts' contents once more and detect class name usage (regex?)
+        # TODO: Go over scripts' contents once more and detect class name usage (regex?)
 
+    @stage
     def detect_class_references_and_shader_includes(self) -> None:
         MISSING_FILES: Set[str] = set()
         for script_resource in self.resources.values():
@@ -676,6 +687,7 @@ class Project:
 
         logger.info("Finished in", datetime.now() - startTime)
 
+    @stage
     def resolve_pending_res_paths(self) -> None:
         for uid, res_paths in self.pending_paths_to_resolve.items():
             if res := self.resources.get(uid):
@@ -688,6 +700,8 @@ class Project:
             else:
                 logger.error(f"Parent resource for pending res paths not found: {uid}")
         self.pending_paths_to_resolve.clear()
+
+    @stage
     def cross_reference_opaque_resources(self) -> None:
         resolved_opaques: List[str] = []  # to remove
         for opaque_res_path in filter(lambda key: not key.startswith("uid"), self.resources.keys()):
