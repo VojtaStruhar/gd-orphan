@@ -87,6 +87,45 @@ def extract_uid_regex(line: str) -> str:
     return ""
 
 
+def read_subresources_block(first_line: str, import_file) -> Dict[str, Any]:
+    """
+    `_subresources=` is followed by a Godot Dictionary literal that (once the leading
+    `_subresources=` is stripped) happens to be valid JSON. It lists per-material/mesh/animation
+    overrides produced by Godot's "Advanced Import Settings" (e.g. a material pointed at an
+    external `.tres`, or a mesh/animation extracted into its own `.res` file). It can span many
+    lines, so read forward from `import_file` until the braces balance out.
+    """
+    text = first_line.removeprefix("_subresources=")
+    depth = text.count("{") - text.count("}")
+    while depth > 0:
+        line = import_file.readline()
+        text += line
+        depth += line.count("{") - line.count("}")
+    return json.loads(text)
+
+
+def collect_subresource_references(subresources: Dict[str, Any]) -> tuple[Set[str], List[str]]:
+    """
+    Godot only lets `materials` point at an external file (`use_external/*`), while `meshes` and
+    `animations` (including per-slice animation exports) can be extracted into a new file
+    (`save_to_file/*`). Both shapes flatten to a `<prefix>/enabled` + `<prefix>/path` (+
+    `<prefix>/fallback_path`) triplet per overridable subresource, only meaningful when enabled.
+    """
+    uids: Set[str] = set()
+    fallback_res_paths: List[str] = []
+    for section in ("materials", "meshes", "animations"):
+        for settings in subresources.get(section, {}).values():
+            for key, enabled in settings.items():
+                if not key.endswith("/enabled") or not enabled:
+                    continue
+                prefix = key.removesuffix("/enabled")
+                if uid := settings.get(prefix + "/path"):
+                    uids.add(uid)
+                if fallback_path := settings.get(prefix + "/fallback_path"):
+                    fallback_res_paths.append(fallback_path)
+    return uids, fallback_res_paths
+
+
 def format_memory(amount: int) -> str:
     if amount < 1_000:
         return f"{amount:.2f} B"
@@ -336,22 +375,13 @@ class Project:
                     self.resources[imported_uid] = main_res
                     continue
 
-                if "uid://" in line:
+                if line.startswith("_subresources="):
                     assert main_res
-                    uid = extract_uid_regex(line)
-                    assert uid
-                    main_res.referenced_uids.add(uid)
-
-                if "/fallback_path" in line:
-                    if "res://" not in line:
-                        continue
-                    if not main_res:
-                        logger.warning(f"Strange - failed to detect import file UID first?", source_path)
-                        continue
-                    res_path = extract_protocoled_string("res://", line)
-                    if main_res.uid not in self.pending_paths_to_resolve:
-                        self.pending_paths_to_resolve[main_res.uid] = []
-                    self.pending_paths_to_resolve[main_res.uid].append(res_path)
+                    subresources = read_subresources_block(line, import_file)
+                    uids, fallback_res_paths = collect_subresource_references(subresources)
+                    main_res.referenced_uids.update(uids)
+                    if fallback_res_paths:
+                        self.pending_paths_to_resolve.setdefault(main_res.uid, []).extend(fallback_res_paths)
 
         return main_res
 
