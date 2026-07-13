@@ -5,7 +5,7 @@ import os
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
-from gltflib import GLTF, FileResource, GLBResource
+from gltflib import GLTF, FileResource
 
 from logging_utils import logger
 
@@ -104,15 +104,19 @@ def read_subresources_block(first_line: str, import_file) -> Dict[str, Any]:
     return json.loads(text)
 
 
-def collect_subresource_references(subresources: Dict[str, Any]) -> tuple[Set[str], List[str]]:
+def collect_subresource_references(subresources: Dict[str, Any]) -> List[tuple[str, Optional[str]]]:
     """
     Godot only lets `materials` point at an external file (`use_external/*`), while `meshes` and
     `animations` (including per-slice animation exports) can be extracted into a new file
     (`save_to_file/*`). Both shapes flatten to a `<prefix>/enabled` + `<prefix>/path` (+
     `<prefix>/fallback_path`) triplet per overridable subresource, only meaningful when enabled.
+
+    Returns (uid, fallback_res_path) pairs. `fallback_res_path` is the referenced file's own path,
+    when known - this is the only place a `save_to_file`-extracted file's real UID is ever recorded,
+    since the extracted file itself (typically a binary `.res`) has no `.uid`/`.import` file of its
+    own, so the caller can use the pair to register that UID as the file's real identity up front.
     """
-    uids: Set[str] = set()
-    fallback_res_paths: List[str] = []
+    references: List[tuple[str, Optional[str]]] = []
     for section in ("materials", "meshes", "animations"):
         for settings in subresources.get(section, {}).values():
             for key, enabled in settings.items():
@@ -120,10 +124,8 @@ def collect_subresource_references(subresources: Dict[str, Any]) -> tuple[Set[st
                     continue
                 prefix = key.removesuffix("/enabled")
                 if uid := settings.get(prefix + "/path"):
-                    uids.add(uid)
-                if fallback_path := settings.get(prefix + "/fallback_path"):
-                    fallback_res_paths.append(fallback_path)
-    return uids, fallback_res_paths
+                    references.append((uid, settings.get(prefix + "/fallback_path")))
+    return references
 
 
 def format_memory(amount: int) -> str:
@@ -213,8 +215,6 @@ class Project:
         self.main_scene_uid: str = ""
         self.classnames: Dict[str, str] = {}
         """ class_name --> UID mapping"""
-        self.pending_paths_to_resolve: Dict[str, List[str]] = {}
-        """ maps UID --> list of path only references. Resolve them to UID references on individual resources!"""
         self.resources: Dict[str, Resource] = {}
         """ UID --> Scene/Script/Texture/... mapping"""
 
@@ -378,10 +378,15 @@ class Project:
                 if line.startswith("_subresources="):
                     assert main_res
                     subresources = read_subresources_block(line, import_file)
-                    uids, fallback_res_paths = collect_subresource_references(subresources)
-                    main_res.referenced_uids.update(uids)
-                    if fallback_res_paths:
-                        self.pending_paths_to_resolve.setdefault(main_res.uid, []).extend(fallback_res_paths)
+                    for uid, fallback_path in collect_subresource_references(subresources):
+                        main_res.referenced_uids.add(uid)
+                        # Extracted files like a `save_to_file` animation `.res` have no `.uid`/
+                        # `.import` file of their own - this is the only place their real UID is
+                        # recorded, so register it now. `collect_resources` may later register the
+                        # same file again under a path-based opaque UID (walked independently);
+                        # `cross_reference_opaque_resources` merges that duplicate away by path.
+                        if fallback_path and uid not in self.resources:
+                            self.resources[uid] = Resource(uid, fallback_path.removeprefix("res://"))
 
         return main_res
 
@@ -631,7 +636,7 @@ class Project:
                         for tr in translation_files:
                             self.project_resource.referenced_uids.add(tr)
 
-        logger.info(f"Processed project.godot file")
+        logger.info("Processed project.godot file")
 
         # TODO: Go over scripts' contents once more and detect class name usage (regex?)
 
@@ -716,20 +721,6 @@ class Project:
             logger.warning("Could not find referenced resource:", mf)
 
         logger.info("Finished in", datetime.now() - startTime)
-
-    @stage
-    def resolve_pending_res_paths(self) -> None:
-        for uid, res_paths in self.pending_paths_to_resolve.items():
-            if res := self.resources.get(uid):
-                for rp in res_paths:
-                    respath_res = self.lookup_resource_by_path(rp)
-                    if respath_res:
-                        res.referenced_uids.add(respath_res.uid)
-                    else:
-                        logger.warning(f"Path-resource referenced by {res.uid} not found: {rp}")
-            else:
-                logger.error(f"Parent resource for pending res paths not found: {uid}")
-        self.pending_paths_to_resolve.clear()
 
     @stage
     def cross_reference_opaque_resources(self) -> None:
@@ -822,7 +813,6 @@ if __name__ == "__main__":
         project.extract_classnames()
         project.process_project_file()
         project.detect_class_references_and_shader_includes()
-        project.resolve_pending_res_paths()
         project.cross_reference_opaque_resources()
 
     if settings.dump:
