@@ -1,6 +1,7 @@
 import argparse
 import functools
 import json
+import mimetypes
 import os
 import re
 from datetime import datetime
@@ -306,6 +307,23 @@ class Project:
                                 #logger.debug(f"File resource {uri} in mesh {f}")
                                 gltf_resource.referenced_uids.add(referenced_resource.uid)
 
+                    # Godot's "Extract Textures" glTF import mode (gltf/embedded_image_handling=1)
+                    # pulls images embedded in the .glb's binary buffer (bufferView, no uri) out to
+                    # loose files named "<basename>_<image.name>.<ext>" next to the source file.
+                    # gltflib only exposes external-uri images as `FileResource`, so embedded ones
+                    # have to be located on disk by reconstructing that naming convention.
+                    basename = f.rsplit(".", 1)[0]
+                    for image in gltf.model.images or []:
+                        if image.uri is not None or image.bufferView is None or not image.name:
+                            continue
+                        ext = mimetypes.guess_extension(image.mimeType) if image.mimeType else None
+                        if ext is None:
+                            continue
+                        extracted_name = f"{basename}_{image.name}{ext}"
+                        if os.path.exists(os.path.join(self.project_path, root, extracted_name)):
+                            referenced_resource = self.process_file(root, extracted_name)
+                            if referenced_resource is not None:
+                                gltf_resource.referenced_uids.add(referenced_resource.uid)
 
                     self.resources[gltf_resource.uid] = gltf_resource
                     return gltf_resource
