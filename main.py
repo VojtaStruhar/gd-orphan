@@ -31,7 +31,6 @@ IGNORED_FILES = [
 ALWAYS_INCLUDE = [
     "export_presets.cfg",
     "firebase_configs",
-    "assets/gui/icons/ui-green-arrow.png",
     "assets/ui/universal_theme/universal_colors.tres",
 ]
 
@@ -142,49 +141,56 @@ def format_memory(amount: int) -> str:
     assert False, "what"
 
 
+def infer_resource_type(path: str) -> str:
+    match path.split(".")[-1]:
+        case "gd":
+            return "script"
+        case "tres" | "res":
+            return "resource"
+        case "tscn":
+            return "scene"
+        case "png" | "jpg" | "webp" | "exr" | "tga" | "svg" | "dds":
+            return "image"
+        case "otf" | "ttf":
+            return "font"
+        case "glb" | "gltf" | "fbx" | "blend" | "bin" | "obj":
+            # `.bin` is a `.gltf` buffer attachment with arbitrary data.
+            return "3D model"
+        case "mtl": # attached to .obj file
+            return "material"
+        case "wav":
+            return "sound"
+        case "gdshader" | "gdshaderinc":
+            return "shader"
+        case "gdextension":
+            return "GDExtension"
+        case "lmbake":
+            return "baked lightmap"
+        case "translation" | "pot" | "po" | "csv":
+            return "translations"
+        case "dylib" | "wasm" | "a" | "dll" | "so":
+            return "binary?"
+        case "cfg" | "json":
+            return "config"
+        case "godot":
+            return "Project"
+        case "ogg":
+            return "sound"
+        case _:
+            return ""
+
+
 class Resource:
-    def __init__(self, unique_id: str, path: str):
+    def __init__(self, unique_id: str, path: str, resource_type: Optional[str] = None):
         self.uid = unique_id
         assert not path.startswith("/")
         self.path = path
         self.name = self.path.split("/")[-1]
-        self.type = ""
         self.referenced_uids: Set[str] = set()
 
-        match path.split(".")[-1]:
-            case "gd":
-                self.type = "script"
-            case "tres" | "res":
-                self.type = "resource"
-            case "tscn":
-                self.type = "scene"
-            case "png" | "jpg" | "webp" | "exr" | "tga" | "svg" | "dds":
-                self.type = "image"
-            case "otf" | "ttf":
-                self.type = "font"
-            case "glb" | "gltf" | "fbx" | "blend" | "bin" | "obj":
-                # `.bin` is a `.gltf` buffer attachment with arbitrary data.
-                self.type = "3D model"
-            case "mtl": # attached to .obj file
-                self.type = "material"
-            case "wav":
-                self.type = "sound"
-            case "gdshader" | "gdshaderinc":
-                self.type = "shader"
-            case "gdextension":
-                self.type = "GDExtension"
-            case "lmbake":
-                self.type = "baked lightmap"
-            case "translation" | "pot" | "po" | "csv":
-                self.type = "translations"
-            case "dylib" | "wasm" | "a" | "dll" | "so":
-                self.type = "binary?"
-            case "cfg" | "json":
-                self.type = "config"
-            case "godot":
-                self.type = "Project"
-            case _:
-                logger.error("UNKNOWN RESOURCE TYPE:", path)
+        self.type = resource_type or infer_resource_type(path)
+        if not self.type:
+            logger.error("UNKNOWN RESOURCE TYPE:", path)
 
     def __str__(self):
         return f"<R ({self.type}) '{self.name}'>"
@@ -200,7 +206,7 @@ class Resource:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Resource":
-        r = Resource(d["uid"], d["path"])
+        r = Resource(d["uid"], d["path"], d["type"])
         assert d["name"] == r.name
         assert d["type"] == r.type
         r.referenced_uids = set(d["referenced_uids"])
@@ -250,6 +256,16 @@ class Project:
             f"Invalid root path? {root}, {self.project_path}"
         )
         file_ext = f.split(".")[-1]
+
+        # A `.import` sidecar is Godot's own signal that a file is an importable resource with a
+        # real UID, no matter what extension a custom importer plugin chose to key on (e.g. a
+        # `.dialog.txt` dialog file). `obj`/`gltf`/`glb` are handled below instead since they need
+        # extra content parsing beyond just registering the `.import` file.
+        if file_ext not in ("import", "obj", "gltf", "glb") and os.path.exists(
+            os.path.join(self.project_path, root, f + ".import")
+        ):
+            return self.register_imported_file(root, f + ".import")
+
         match file_ext:
             case "uid":
                 stripped = f.removesuffix(".uid")
@@ -263,9 +279,7 @@ class Project:
                 return self.process_gdextension(root, f)
 
             case "png" | "jpg" | "svg" | "otf" | "ttf" | "webp" | "fbx" | "blend" | "tga" | "exr" | "wav" | "csv":
-
-                if os.path.exists(os.path.join(self.project_path, root, f + ".import")):
-                    return self.register_imported_file(root, f + ".import")
+                # The top-level `.import` check above already handles the imported case.
                 logger.warning(f"No `.import` file for {root}/{f}")
 
             case "obj":
@@ -384,12 +398,24 @@ class Project:
             logger.warning("Strange - import file without original file?", source_path)
             return None
         main_res: Optional[Resource] = None
+        importer_type: Optional[str] = None
         with open(os.path.join(root, f), "r") as import_file:
             while line := import_file.readline():
                 line = line.strip()
+                if line.startswith('type="') and importer_type is None:
+                    importer_type = line[len('type="') : -1]
+                    continue
+
                 if line.startswith('uid="') and main_res is None:
                     imported_uid = line[len('uid="') : -1]
-                    main_res = Resource(imported_uid, source_path.removeprefix(self.project_path))
+                    rel_path = source_path.removeprefix(self.project_path)
+                    # A custom importer can key off an arbitrary source extension (e.g. a
+                    # `.dialog.txt` dialog file), which `Resource`'s extension-based type guesser
+                    # doesn't recognize. Fall back to the importer's own declared `type=` only in
+                    # that case, so it isn't left blank with a spurious "unknown type" error - known
+                    # extensions keep their existing, friendlier categorization (e.g. "image").
+                    fallback_type = importer_type if not infer_resource_type(rel_path) else None
+                    main_res = Resource(imported_uid, rel_path, fallback_type)
                     self.resources[imported_uid] = main_res
                     continue
 
@@ -405,6 +431,25 @@ class Project:
                         # `cross_reference_opaque_resources` merges that duplicate away by path.
                         if fallback_path and uid not in self.resources:
                             self.resources[uid] = Resource(uid, fallback_path.removeprefix("res://"))
+                    continue
+
+                if line.startswith("files=["):
+                    # `[deps]`'s `files=[...]` lists side-product files a (typically custom)
+                    # importer produced alongside its main output - e.g. a dialog importer that
+                    # also generates a translation `.csv`. Without this, those side products have
+                    # no incoming reference and read as orphaned even though Godot's own dependency
+                    # tracking considers them owned by the resource that produced them.
+                    assert main_res
+                    for dep_path in extract_quoted_strings(line):
+                        dep_rel_path = dep_path.removeprefix("res://")
+                        dep_root = os.path.join(self.project_path, os.path.dirname(dep_rel_path))
+                        dep_filename = os.path.basename(dep_rel_path)
+                        if not os.path.exists(os.path.join(dep_root, dep_filename)):
+                            logger.warning(f"Dependency file referenced from {f} not found: {dep_path}")
+                            continue
+                        dep_resource = self.process_file(dep_root, dep_filename)
+                        if dep_resource is not None:
+                            main_res.referenced_uids.add(dep_resource.uid)
 
         return main_res
 
