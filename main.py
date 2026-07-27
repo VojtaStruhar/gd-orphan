@@ -912,9 +912,11 @@ if __name__ == "__main__":
     unused_resources = [res for res in unused_resources if not any(map(res.path.startswith, ALWAYS_INCLUDE))]
 
     logger.info("Unused resources:", len(unused_resources))
-    potential_savings: int = sum(
-        [os.path.getsize(os.path.join(project.project_path, res.path)) for res in unused_resources]
-    )
+    unused_resource_sizes: Dict[str, int] = {
+        res.uid: os.path.getsize(os.path.join(project.project_path, res.path))
+        for res in unused_resources
+    }
+    potential_savings: int = sum(unused_resource_sizes.values())
     logger.info("Potential savings:", format_memory(potential_savings))
 
     unused_paths = sorted([res.path for res in unused_resources])
@@ -924,8 +926,15 @@ if __name__ == "__main__":
     with open("safe_to_delete.csv", "w") as safe_to_delete:
         safe_to_delete.write(", ".join(unused_paths))
 
-    # with open("safe_to_delete_sorted_from_biggest.txt", "w") as biggest_savings:
-    #     savings: List[Resource] = sorted(unused_resources, key=lambda res: os.path.getsize(os.path.join(project.project_path, res.path)), reverse=True)
-    #     biggest_savings.write("\n".join(f"{res.path} ({format_memory(os.path.getsize(os.path.join(project.project_path, res.path)))})" for res in savings))
+    with open("safe_to_delete_sorted_from_biggest.txt", "w") as biggest_savings:
+        savings: List[Resource] = sorted(
+            unused_resources, key=lambda res: unused_resource_sizes[res.uid], reverse=True
+        )
+        biggest_savings.write(
+            "\n".join(
+                f"{res.path} ({format_memory(unused_resource_sizes[res.uid])})"
+                for res in savings
+            )
+        )
 
     logger.debug(f"Finished in {datetime.now() - start}")
