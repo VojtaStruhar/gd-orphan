@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 from gltflib import GLTF, FileResource
 
+from html_report import write_html_report
 from logging_utils import logger
 
 IGNORED_FOLDERS = [
@@ -31,7 +32,6 @@ IGNORED_FILES = [
 ALWAYS_INCLUDE = [
     "export_presets.cfg",
     "firebase_configs",
-    "assets/ui/universal_theme/universal_colors.tres",
 ]
 
 # ----------------------------------------
@@ -46,6 +46,7 @@ data_source.add_argument(
     help="Load JSON project structure created by `--dump` instead of parsing the project again.",
 )
 parser.add_argument("--mermaid", help="Generate a mermaid flowchart into a file.")
+parser.add_argument("--html", help="Generate an interactive HTML dependency-tree report into a file.")
 parser.add_argument(
     "--dump", help="Location for JSON dump of the loaded project structure."
 )
@@ -858,6 +859,45 @@ graph LR
         with open(mermaid_path, "w") as flowchart_file:
             flowchart_file.write(flowchart)
 
+    def collect_resource_sizes(self) -> Dict[str, Optional[int]]:
+        sizes: Dict[str, Optional[int]] = {}
+        for uid, res in self.resources.items():
+            try:
+                sizes[uid] = os.path.getsize(os.path.join(self.project_path, res.path))
+            except OSError:
+                sizes[uid] = None
+        return sizes
+
+    def generate_html_report(self, html_path: str) -> None:
+        """
+        Writes a self-contained HTML page with a lazily-expanding dependency tree (so it
+        stays responsive regardless of project size, unlike a fully-rendered Mermaid graph)
+        plus a "Part 1 / Part 2" entry-point picker: checking a resource in the tree computes
+        the full reachability closure from it, so you can see exactly what a fast-load bundle
+        rooted at e.g. a sign-in scene would need to include.
+        """
+        assert self.project_resource
+        logger.info("Generating HTML dependency report...")
+        sizes = self.collect_resource_sizes()
+        resources_json = {
+            uid: {
+                "path": res.path,
+                "name": res.name,
+                "type": res.type,
+                "size": sizes.get(uid),
+                "refs": sorted(res.referenced_uids),
+            }
+            for uid, res in self.resources.items()
+        }
+        data = {
+            "generatedAt": datetime.now().isoformat(timespec="seconds"),
+            "projectPath": self.project_path,
+            "rootUid": self.project_resource.uid,
+            "resources": resources_json,
+        }
+        write_html_report(data, html_path)
+        logger.info(f"Wrote dependency tree report to {html_path}")
+
 
 if __name__ == "__main__":
     start = datetime.now()
@@ -880,6 +920,9 @@ if __name__ == "__main__":
 
     if settings.dump:
         project.save(settings.dump)
+
+    if settings.html:
+        project.generate_html_report(settings.html)
 
     # Find unreferenced resources
 
