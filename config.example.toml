@@ -1,0 +1,29 @@
+# Example gd-orphans config. Copy this to e.g. config.toml, fill in your own
+# project's paths, and run: uv run main.py --config config.toml
+#
+# Any key here has an equivalent CLI flag; a flag passed on the command line
+# always overrides the same key from this file. JSON works too (same keys).
+
+# Path to a Godot project containing `project.godot`. Mutually exclusive with `load`.
+project = "/path/to/your/godot/project"
+
+# Instead of `project`, load a previously dumped graph (see `dump` below) and
+# skip re-parsing the whole project.
+# load = "out/project.json"
+
+# Dump the parsed project graph to JSON, for reuse via `load`.
+dump = "out/project.json"
+
+# Generate an interactive HTML dependency-tree report.
+html = "out/dependencies.html"
+
+# Generate a Mermaid flowchart of the reference graph.
+# mermaid = "out/graph.mmd"
+
+# Files/directories to always keep, even if nothing references them.
+always_include = [
+    "bin/web",
+    "rs_fsrs.gdextension",
+    "assets/main_base/main_base.lmbake",
+    "assets/main_base/main_base.exr",
+]

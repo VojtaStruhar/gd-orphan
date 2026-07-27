@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import tomllib
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 from gltflib import GLTF, FileResource
@@ -36,8 +37,16 @@ ALWAYS_INCLUDE = [
 
 # ----------------------------------------
 
+CONFIG_KEYS = ["project", "load", "mermaid", "html", "dump", "always_include"]
+
 parser = argparse.ArgumentParser()
-data_source = parser.add_mutually_exclusive_group(required=True)
+parser.add_argument(
+    "--config",
+    help="Path to a JSON or TOML config file supplying any of the other options "
+    "(keys: project, load, mermaid, html, dump, always_include). "
+    "Explicit CLI flags take precedence over values from this file.",
+)
+data_source = parser.add_mutually_exclusive_group()
 data_source.add_argument(
     "-p", "--project", help="Path to a Godot project containing `project.godot` file."
 )
@@ -51,6 +60,33 @@ parser.add_argument(
     "--dump", help="Location for JSON dump of the loaded project structure."
 )
 parser.add_argument("--always-include", type=str, help="Comma-separated list of files or directories to exclude from the 'safe to remove' list. They should stay in the project no matter what.")
+
+
+def load_config_file(config_path: str) -> Dict[str, Any]:
+    if config_path.endswith(".toml"):
+        with open(config_path, "rb") as config_file:
+            data = tomllib.load(config_file)
+    else:
+        with open(config_path, "r") as config_file:
+            data = json.load(config_file)
+
+    unknown_keys = set(data) - set(CONFIG_KEYS)
+    if unknown_keys:
+        parser.error(f"Unknown key(s) in config file: {', '.join(sorted(unknown_keys))}")
+    return data
+
+
+def apply_config_file(settings: argparse.Namespace) -> None:
+    if settings.config:
+        config_data = load_config_file(settings.config)
+        for key in CONFIG_KEYS:
+            if getattr(settings, key) is None and key in config_data:
+                setattr(settings, key, config_data[key])
+
+    if not settings.project and not settings.load:
+        parser.error("one of the arguments -p/--project --load is required (either on the CLI or in --config)")
+    if settings.project and settings.load:
+        parser.error("argument --load: not allowed with argument -p/--project (either on the CLI or in --config)")
 
 def stage(func):
     @functools.wraps(func)
@@ -902,6 +938,7 @@ graph LR
 if __name__ == "__main__":
     start = datetime.now()
     settings = parser.parse_args()
+    apply_config_file(settings)
     if settings.load:
         assert os.path.exists(settings.load)
 
@@ -950,7 +987,11 @@ if __name__ == "__main__":
     ]
 
     if settings.always_include:
-        ALWAYS_INCLUDE += [part.strip() for part in settings.always_include.split(",") if part.strip()]
+        if isinstance(settings.always_include, str):
+            always_include_extra = [part.strip() for part in settings.always_include.split(",") if part.strip()]
+        else:
+            always_include_extra = [str(part).strip() for part in settings.always_include if str(part).strip()]
+        ALWAYS_INCLUDE += always_include_extra
 
     unused_resources = [res for res in unused_resources if not any(map(res.path.startswith, ALWAYS_INCLUDE))]
 
