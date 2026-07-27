@@ -34,16 +34,51 @@ ALWAYS_INCLUDE = [
     "export_presets.cfg",
     "firebase_configs",
 ]
+GDEXTENSION_PLATFORMS: List[str] = []
+"""Platform key prefixes to keep as referenced when parsing `.gdextension` `[libraries]` entries
+(see `--gdextension-platforms`); empty means every platform counts as referenced."""
+
+PROJECT_SETTINGS_FILE_REFERENCES: Set[str] = {
+    "application/boot_splash/image",
+    "application/config/icon",
+    "application/config/macos_native_icon",
+    "application/config/windows_native_icon",
+    "application/config/project_settings_override",
+    "application/run/main_scene",
+    "audio/buses/default_bus_layout",
+    "display/mouse_cursor/custom_image",
+    "gui/theme/custom",
+    "gui/theme/custom_font",
+    "network/tls/certificate_bundle_override",
+    "rendering/environment/defaults/default_environment",
+    "rendering/vrs/texture",
+    "xr/openxr/default_action_map",
+}
+"""
+Every `ProjectSettings` property (surveyed from
+https://docs.godotengine.org/en/stable/classes/class_projectsettings.html, i.e. every documented
+`<member>`) whose `String` value is actually a `res://`/`uid://` path to a project file that Godot
+loads - as opposed to the majority of `String` settings (driver/engine names, enum-like mode
+strings, locale codes, layer labels, free-text messages, an *output* file path like
+`editor/movie_writer/movie_file`, or a directory search path like
+`editor/script/templates_search_path`, which isn't a single resolvable resource) that happen to
+also be strings but aren't resource references. Deliberately excludes settings that reference
+files without being a meaningful "this file is part of the game" signal, e.g.
+`internationalization/locale/translations_pot_files` (source scenes/scripts fed to the POT
+extractor, not even an officially documented `ProjectSettings` member) - so this list is not just
+"every `uid://`/`res://` string found in project.godot", which would risk keeping unrelated
+tooling files alive.
+"""
 
 # ----------------------------------------
 
-CONFIG_KEYS = ["project", "load", "mermaid", "html", "dump", "always_include"]
+CONFIG_KEYS = ["project", "load", "mermaid", "html", "dump", "always_include", "gdextension_platforms", "output_dir"]
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--config",
     help="Path to a JSON or TOML config file supplying any of the other options "
-    "(keys: project, load, mermaid, html, dump, always_include). "
+    "(keys: project, load, mermaid, html, dump, always_include, gdextension_platforms, output_dir). "
     "Explicit CLI flags take precedence over values from this file.",
 )
 data_source = parser.add_mutually_exclusive_group()
@@ -60,6 +95,48 @@ parser.add_argument(
     "--dump", help="Location for JSON dump of the loaded project structure."
 )
 parser.add_argument("--always-include", type=str, help="Comma-separated list of files or directories to exclude from the 'safe to remove' list. They should stay in the project no matter what.")
+parser.add_argument(
+    "--gdextension-platforms",
+    type=str,
+    help="Comma-separated list of GDExtension `[libraries]` platform key prefixes to treat as "
+    "referenced (e.g. 'web' or 'web.release' - a configured prefix matches a key if it equals it "
+    "or is followed by a '.', so 'web' matches both 'web.debug.wasm32' and 'web.release.wasm32'). "
+    "Library entries whose key doesn't match any prefix are left unreferenced, so orphan detection "
+    "can flag other-platform binaries (e.g. macOS/Windows/Linux libs when you only ship web) as "
+    "safe to delete. Omit to keep every platform referenced (today's default behavior). Only takes "
+    "effect while parsing with --project - has no effect on --load, since referenced_uids are "
+    "already baked into the dumped graph.",
+)
+parser.add_argument(
+    "--output-dir",
+    help="Directory for the `safe_to_delete.txt`/`safe_to_delete.csv`/"
+    "`safe_to_delete_sorted_from_biggest.txt` output files. Created if missing. "
+    "Defaults to the current directory.",
+)
+
+
+def parse_string_list(value: Any) -> List[str]:
+    """Accepts either a comma-separated CLI string or a native list from a JSON/TOML config file."""
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return [str(part).strip() for part in value if str(part).strip()]
+
+
+def gdextension_key_included(key: str) -> bool:
+    """
+    True if a `.gdextension` `[libraries]` key (e.g. "web.release.wasm32") should count as a real
+    reference, per `--gdextension-platforms`. A configured platform matches a key if it equals it
+    or is a dot-separated prefix of it, so "web" matches "web.debug.wasm32" and
+    "web.release.wasm32" while the more specific "web.release" only matches the latter. No
+    platforms configured means everything is included (today's behavior).
+    """
+    if not GDEXTENSION_PLATFORMS:
+        return True
+    key = key.lower()
+    return any(
+        key == platform or key.startswith(platform + ".")
+        for platform in (p.lower() for p in GDEXTENSION_PLATFORMS)
+    )
 
 
 def load_config_file(config_path: str) -> Dict[str, Any]:
@@ -224,6 +301,15 @@ class Resource:
         self.path = path
         self.name = self.path.split("/")[-1]
         self.referenced_uids: Set[str] = set()
+        self.imported_paths: List[str] = []
+        """
+        `res://`-relative path(s) of this resource's actual imported artifact(s) under
+        `.godot/imported/` (from the `.import` file's `dest_files`), when it went through
+        Godot's import pipeline. Imported images/models/sounds are frequently compressed far
+        below their source size, so this is what "potential savings" should measure on disk -
+        the raw source size alone overstates what deleting the resource would actually save.
+        Empty for resource types that aren't imported (scripts, scenes, `.tres`, ...).
+        """
 
         self.type = resource_type or infer_resource_type(path)
         if not self.type:
@@ -239,6 +325,7 @@ class Resource:
             "name": self.name,
             "type": self.type,
             "referenced_uids": sorted([val for val in self.referenced_uids]),
+            "imported_paths": sorted(self.imported_paths),
         }
 
     @staticmethod
@@ -247,6 +334,7 @@ class Resource:
         assert d["name"] == r.name
         assert d["type"] == r.type
         r.referenced_uids = set(d["referenced_uids"])
+        r.imported_paths = list(d.get("imported_paths", []))
         return r
 
 
@@ -470,6 +558,16 @@ class Project:
                             self.resources[uid] = Resource(uid, fallback_path.removeprefix("res://"))
                     continue
 
+                if line.startswith("dest_files=["):
+                    # `[deps]`'s `dest_files=[...]` lists the actual imported artifact(s) under
+                    # `.godot/imported/` this resource compiles down to (there can be more than one,
+                    # e.g. a texture imported with multiple VRAM compression targets). That's the
+                    # file Godot actually ships, and it's frequently much smaller than the source
+                    # asset - used to report realistic "potential savings" instead of raw source size.
+                    assert main_res
+                    main_res.imported_paths = [p.removeprefix("res://") for p in extract_quoted_strings(line)]
+                    continue
+
                 if line.startswith("files=["):
                     # `[deps]`'s `files=[...]` lists side-product files a (typically custom)
                     # importer produced alongside its main output - e.g. a dialog importer that
@@ -560,10 +658,23 @@ class Project:
                 gdext_res = Resource(gdext_uid, os.path.join(root, f).removeprefix(self.project_path))
                 self.resources[gdext_res.uid] = gdext_res
 
+        section = ""
         with open(os.path.join(root, f), "r") as res_file:
             for line in res_file.readlines():
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    section = stripped[1:-1]
+                    continue
+
                 try:
                     if "res://" in line:
+                        # `[libraries]` keys are platform-scoped (e.g. "web.release.wasm32") - a
+                        # binary for a platform excluded via `--gdextension-platforms` is left
+                        # unreferenced, so it can surface as an orphan instead of always looking used.
+                        if section == "libraries":
+                            key = stripped.split("=", 1)[0].strip()
+                            if not gdextension_key_included(key):
+                                continue
                         res_path = extract_protocoled_string("res://", line)
                         gdext_res.referenced_uids.add(res_path)
 
@@ -679,25 +790,60 @@ class Project:
                         pass
         logger.debug("Collected", len(self.classnames), "class_names")
 
+    def register_project_setting_file_reference(self, line: str) -> Optional[str]:
+        """
+        Resolves a `key="uid://..."`/`key="res://..."` ProjectSettings line (its key must already
+        be confirmed to be one of `PROJECT_SETTINGS_FILE_REFERENCES`) to a UID and marks it
+        referenced from `project.godot`. Returns the resolved UID, or `None` for an empty,
+        `user://`, or otherwise non-project value (e.g. `application/config/project_settings_override`
+        is typically a `user://` path, which isn't a project resource at all).
+        """
+        assert self.project_resource
+        if "uid://" in line:
+            ref_uid = extract_protocoled_string("uid://", line)
+        elif "res://" in line:
+            res_path = extract_protocoled_string("res://", line)
+            ref_resource = self.lookup_resource_by_path(res_path)
+            if ref_resource is None:
+                # Either genuinely missing, or it exists but is an untracked file type (e.g. `.pem`
+                # - see `process_file`'s fallthrough case) that never became a `Resource` at all.
+                logger.warning(f"ProjectSettings file reference doesn't resolve to a tracked resource: {line.strip()}")
+                return None
+            ref_uid = ref_resource.uid
+        else:
+            return None
+
+        self.project_resource.referenced_uids.add(ref_uid)
+        return ref_uid
+
     @stage
     def process_project_file(self) -> None:
         # project.godot
         # Also go over Autoloads and register their node names as class names
         assert self.project_resource
         with open(self.project_path + "project.godot") as project_file:
+            section = ""
             autoloads_section = False
             plugins_section = False
             internationalization_section = False
             while line := project_file.readline():
-                if line.startswith("run/main_scene"):
-                    self.main_scene_uid = extract_protocoled_string("uid://", line)
-                    self.project_resource.referenced_uids.add(self.main_scene_uid)
-
-                if line.startswith("["):
-                    autoloads_section = line.strip() == "[autoload]"
-                    plugins_section = line.strip() == "[editor_plugins]"
-                    internationalization_section = line.strip() == "[internationalization]"
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    section = stripped[1:-1]
+                    autoloads_section = section == "autoload"
+                    plugins_section = section == "editor_plugins"
+                    internationalization_section = section == "internationalization"
                     continue
+
+                if "=" in line:
+                    key = line.split("=", 1)[0].strip()
+                    # Feature-tag overrides (e.g. `config/icon.windows=...`) share the base
+                    # setting's meaning - see ProjectSettings' "Feature tags" docs.
+                    base_key = f"{section}/{key}".split(".")[0]
+                    if base_key in PROJECT_SETTINGS_FILE_REFERENCES:
+                        ref_uid = self.register_project_setting_file_reference(line)
+                        if base_key == "application/run/main_scene" and ref_uid:
+                            self.main_scene_uid = ref_uid
 
                 if autoloads_section:
                     if len(line.strip()) > 0:
@@ -935,10 +1081,38 @@ graph LR
         logger.info(f"Wrote dependency tree report to {html_path}")
 
 
+def resource_export_size(project: "Project", res: Resource) -> int:
+    """
+    Best-effort estimate of what deleting `res` would actually save in an exported build: the
+    size of its imported artifact(s) under `.godot/imported/` when available (imported
+    images/models/sounds are frequently compressed far below their source size), falling back to
+    the raw source file size for resource types that aren't imported, or if the `.godot` cache
+    for this particular file isn't present on disk (e.g. project never opened in the editor).
+    """
+    if res.imported_paths:
+        total = sum(
+            os.path.getsize(imp_full)
+            for imp_path in res.imported_paths
+            if os.path.exists(imp_full := os.path.join(project.project_path, imp_path))
+        )
+        if total > 0:
+            return total
+    return os.path.getsize(os.path.join(project.project_path, res.path))
+
+
 if __name__ == "__main__":
     start = datetime.now()
     settings = parser.parse_args()
     apply_config_file(settings)
+
+    if settings.gdextension_platforms:
+        GDEXTENSION_PLATFORMS += parse_string_list(settings.gdextension_platforms)
+        if settings.load:
+            logger.warning(
+                "--gdextension-platforms has no effect with --load: referenced_uids are already "
+                "baked into the dumped graph from whenever it was created."
+            )
+
     if settings.load:
         assert os.path.exists(settings.load)
 
@@ -987,11 +1161,7 @@ if __name__ == "__main__":
     ]
 
     if settings.always_include:
-        if isinstance(settings.always_include, str):
-            always_include_extra = [part.strip() for part in settings.always_include.split(",") if part.strip()]
-        else:
-            always_include_extra = [str(part).strip() for part in settings.always_include if str(part).strip()]
-        ALWAYS_INCLUDE += always_include_extra
+        ALWAYS_INCLUDE += parse_string_list(settings.always_include)
 
     unused_resources = [res for res in unused_resources if not any(map(res.path.startswith, ALWAYS_INCLUDE))]
 
@@ -1001,22 +1171,40 @@ if __name__ == "__main__":
         for res in unused_resources
     }
     potential_savings: int = sum(unused_resource_sizes.values())
-    logger.info("Potential savings:", format_memory(potential_savings))
+    logger.info("Potential savings (raw source size on disk):", format_memory(potential_savings))
+
+    if not os.path.exists(os.path.join(project.project_path, ".godot", "imported")):
+        logger.warning(
+            "No .godot/imported/ cache found - open the project in the Godot editor at least once "
+            "so imported asset sizes are available; falling back to raw source sizes for now."
+        )
+    unused_resource_export_sizes: Dict[str, int] = {
+        res.uid: resource_export_size(project, res) for res in unused_resources
+    }
+    potential_export_savings: int = sum(unused_resource_export_sizes.values())
+    logger.info(
+        "Potential savings (as imported/compressed in .godot, where available):",
+        format_memory(potential_export_savings),
+    )
+
+    output_dir = settings.output_dir or "."
+    os.makedirs(output_dir, exist_ok=True)
 
     unused_paths = sorted([res.path for res in unused_resources])
-    with open("safe_to_delete.txt", "w") as safe_to_delete:
+    with open(os.path.join(output_dir, "safe_to_delete.txt"), "w") as safe_to_delete:
         safe_to_delete.write("\n".join(unused_paths))
 
-    with open("safe_to_delete.csv", "w") as safe_to_delete:
+    with open(os.path.join(output_dir, "safe_to_delete.csv"), "w") as safe_to_delete:
         safe_to_delete.write(", ".join(unused_paths))
 
-    with open("safe_to_delete_sorted_from_biggest.txt", "w") as biggest_savings:
+    with open(os.path.join(output_dir, "safe_to_delete_sorted_from_biggest.txt"), "w") as biggest_savings:
         savings: List[Resource] = sorted(
-            unused_resources, key=lambda res: unused_resource_sizes[res.uid], reverse=True
+            unused_resources, key=lambda res: unused_resource_export_sizes[res.uid], reverse=True
         )
         biggest_savings.write(
             "\n".join(
-                f"{res.path} ({format_memory(unused_resource_sizes[res.uid])})"
+                f"{res.path} (est. export: {format_memory(unused_resource_export_sizes[res.uid])}"
+                f", source: {format_memory(unused_resource_sizes[res.uid])})"
                 for res in savings
             )
         )

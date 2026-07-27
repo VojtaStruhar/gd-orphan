@@ -20,6 +20,10 @@ html = "out/dependencies.html"
 # Generate a Mermaid flowchart of the reference graph.
 # mermaid = "out/graph.mmd"
 
+# Directory for the safe_to_delete.txt/safe_to_delete.csv/safe_to_delete_sorted_from_biggest.txt
+# output files. Created if missing. Defaults to the current directory.
+output_dir = "out"
+
 # Files/directories to always keep, even if nothing references them.
 always_include = [
     "bin/web",
@@ -27,3 +31,9 @@ always_include = [
     "assets/main_base/main_base.lmbake",
     "assets/main_base/main_base.exr",
 ]
+
+# GDExtension `[libraries]` platform keys to keep as referenced - e.g. shipping only on web
+# means the macOS/Windows/Linux/iOS binaries in rs_fsrs.gdextension are never referenced from
+# any key starting with "web.", so they'll show up as orphans instead of always looking used.
+# Omit (or leave empty) to keep every platform referenced, which is the default.
+gdextension_platforms = ["web"]
